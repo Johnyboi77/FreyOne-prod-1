@@ -1,0 +1,4 @@
+## Phase 6/7 Verifikation (2026-06-11)
+- ✅ Backups: root crontab `0 2 * * * /home/deploy/scripts/backup.sh >> /var/log/backups.log 2>&1`
+- ✅ Monitoring: root crontab `*/15 * * * * /home/deploy/scripts/monitor.sh >> /var/log/freyone/monitor-cron.log 2>&1`
+- Beide bestätigt aktiv, Logs vorhanden

@@ -31,7 +31,7 @@ ssh vps "sudo cat /etc/postgresql/16/main/postgresql.conf" > "$ROOT/postgresql/p
 ssh vps "sudo cat /etc/pgbouncer/userlist.txt" | cut -d'"' -f2 > "$ROOT/pgbouncer/userlist.usernames.txt"
 
 echo "==> Crontab + UFW (Doku)"
-ssh vps "crontab -l" > "$ROOT/docs/crontab.txt" 2>/dev/null || echo "kein crontab" > "$ROOT/docs/crontab.txt"
+ssh vps "echo '--- deploy crontab ---'; crontab -l 2>/dev/null || echo '(leer)'; echo ''; echo '--- root crontab ---'; sudo crontab -l 2>/dev/null" > "$ROOT/docs/crontab.txt"
 ssh vps "sudo ufw status numbered" > "$ROOT/docs/ufw-status.txt" 2>/dev/null || true
 
 echo ""

@@ -1,1 +1,9 @@
-kein crontab
+--- deploy crontab ---
+(leer)
+
+--- root crontab ---
+# Health-Check alle 15 Minuten
+*/15 * * * * /home/deploy/scripts/monitor.sh >> /var/log/freyone/monitor-cron.log 2>&1
+
+# Täglich um 2 Uhr: Backups
+0 2 * * * /home/deploy/scripts/backup.sh >> /var/log/backups.log 2>&1
