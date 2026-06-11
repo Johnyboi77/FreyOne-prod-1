@@ -1,0 +1,6 @@
+company_app
+company_readonly
+freyone_api
+admin_app
+admin_readonly
+admin_write_freyone
