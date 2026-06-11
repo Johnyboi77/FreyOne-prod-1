@@ -1,0 +1,3 @@
+ALTER TABLE profiles
+  ADD CONSTRAINT fk_profiles_users
+  FOREIGN KEY (id) REFERENCES users(id) ON DELETE CASCADE;
