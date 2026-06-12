@@ -5,7 +5,6 @@ API_DIR="$REPO_DIR/apps/api"
 LOG="[$(date '+%Y-%m-%d %H:%M:%S')]"
 
 echo "$LOG Deploy gestartet"
-
 cd $REPO_DIR || exit 1
 git pull origin main
 git clean -f apps/api/src/routes/

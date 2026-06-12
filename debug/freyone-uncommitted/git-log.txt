@@ -1,0 +1,8 @@
+8da65dc 2026-06-08 14:00:13 - Umstellung VPS / Supabase raus
+abd4d4f 2026-06-09 10:23:48 - Umstellung VPS / Supabase raus
+d50fc76 feat: Phase 4a – VPS migration blockers + Supabase removal (15 items)
+893b9c8 2026-06-09 09:01:27 - Umstellung VPS / Supabase raus
+8211d28 fix: login handler checks result.success instead of result.user
+4030ef8 2026-06-08 15:10:22 - Umstellung VPS / Supabase raus
+a7c780b 2026-06-08 14:33:24 - Umstellung VPS / Supabase raus
+b1bb5cd 2026-06-08 14:31:11 - Umstellung VPS / Supabase raus

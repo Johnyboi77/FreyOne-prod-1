@@ -1,0 +1,2225 @@
+ PlanVPS2
+
+# FreyOne – Vollständiger Infrastruktur-Migrationsplan
+**Stand: Juni 2026 | Version 3.0**
+
+> **v3.0 Änderungen gegenüber v2.0:**
+> - Frischer DB-Ansatz: keine Userdaten → kein Lazy-Migration-Flow
+> - `password_hash TEXT NOT NULL` (bcrypt Cost 12) – sicher von Tag 1
+> - Auth-Tabellen final (inkl. `replaced_by` Reuse-Schutz in `refresh_tokens`)
+> - `provider_profiles` Spalten-Aufteilung: jede einzelne Spalte explizit zugeordnet (47 bleiben / 22 ziehen um)
+> - `profiles` → FK Constraint zu `users` ergänzt
+> - Alle ~40 Indexes aus DB-Changes Dokument integriert
+> - PostgreSQL Tuning (CX33-spezifisch) integriert
+> - Per-Table Autovacuum integriert
+> - Lazy Password Migration **entfernt** (nicht mehr nötig)
+> - Phase 2 Auth-Implementierung: vollständiges, sicheres Code-Gerüst
+
+---
+
+## Inhaltsverzeichnis
+
+1. Zielarchitektur
+2. VPS – Auswahl & Bestellung
+3. Phase 0 – Server Grundsetup
+4. Phase 1 – Datenbank Setup (Frische Struktur, keine Userdaten)
+   - 4.1 PostgreSQL konfigurieren
+   - 4.2 Datenbanken & User anlegen
+   - 4.3 Schema von Supabase exportieren (nur Struktur)
+   - 4.4 Neue Auth-Tabellen: `users` / `refresh_tokens` / `password_resets`
+   - 4.5 `provider_profiles` → Vollständige Spalten-Aufteilung (alle 69 Spalten)
+   - 4.6 SQL: `provider_business_details` anlegen + Spalten aus `provider_profiles` droppen
+   - 4.7 `profiles` → FK Constraint zu `users`
+   - 4.8 PostgreSQL Triggers
+   - 4.9 Alle Indexes (~40 Stück)
+   - 4.10 PostgreSQL Tuning (postgresql.conf – CX33)
+   - 4.11 Per-Table Autovacuum
+   - 4.12 PgBouncer konfigurieren
+   - 4.13 Laptop-Zugriff via SSH-Tunnel
+   - 4.14 Init-Reihenfolge (einmalige Checkliste)
+
+5. Phase 2 – Node.js Backend (Hono + eigene Auth)
+6. Phase 3 – Cron Jobs (cron-jobs.org → intern)
+7. Phase 4 – Frontend anpassen (Supabase entfernen)
+8. Phase 5 – CI/CD Pipeline (GitHub Actions)
+9. Phase 6 – Backups (GFS → Cloudflare R2)
+10. Phase 7 – Monitoring & Alerts
+11. Phase 8 – Sicherheit
+12. Phase 9 – Go-Live & Cutover
+13. S2 – DB Query Caching
+14. S4 – GitHub Runners & Automatisierte Tests
+15. Entwickler-Workflow (von jedem Gerät arbeiten)
+16. Kostenvergleich
+17. Finale Checkliste
+
+---
+
+## 1. Zielarchitektur
+
+```
+Nutzer
+  │
+  ▼
+Cloudflare (DNS, DDoS-Schutz)
+  │
+  ├──▶ Vercel (Next.js Frontend + SSR)
+  │         └── calls HTTPS
+  │                  │
+  └──▶ Hetzner CX33 (VPS)
+            ├── Caddy (Reverse Proxy + SSL)
+            ├── Node.js Backend (Hono) → api.frey-one.com
+            ├── node-cron (Cron Jobs intern)
+            └── PostgreSQL 16
+                  ├── freyone_prod     ← FreyOne Hauptdatenbank
+                  ├── company_internal ← Firmen-Datenbank
+                  └── [mini_projekte]  ← Temporäre Projekte
+
+Extern (bleiben):
+  ├── Cloudflare R2    → Medienspeicher (Bilder, Videos)
+  ├── Stripe Connect   → Zahlungsabwicklung
+  ├── Resend / Mailjet → E-Mails
+  ├── HERE Maps        → Karten & Geocoding
+  └── GitHub           → Code & CI/CD
+```
+
+**Was wegfällt:**
+- Supabase (DB, Auth, Realtime)
+- cron-jobs.org (30s Limit, extern)
+
+---
+
+## 2. VPS – Auswahl & Bestellung
+
+### Empfehlung: Hetzner CX33
+
+| Eigenschaft   | Wert                    |
+|---------------|-------------------------|
+| Modell        | CX33                    |
+| vCPU          | 4 (Intel/AMD)           |
+| RAM           | 8 GB                    |
+| SSD           | 80 GB                   |
+| Traffic       | 20 TB inkl.             |
+| IPv4          | Primary IPv4 ✓          |
+| Region        | NBG-1, Deutschland      |
+| OS            | Ubuntu 24.04 LTS        |
+| Preis         | **€8.32/Monat**         |
+
+**Ressourcenverteilung auf CX33:**
+
+| Dienst              | RAM      |
+|---------------------|----------|
+| PostgreSQL          | ~2 GB    |
+| Node.js Backend     | ~300 MB  |
+| Cron Jobs (intern)  | ~200 MB  |
+| Caddy + System      | ~300 MB  |
+| Reserve             | ~5 GB    |
+
+### Bestellschritte
+```
+hetzner.com → Cloud → Server erstellen
+→ Shared Cost-Optimized → CX33
+→ Ubuntu 24.04 LTS
+→ Primary IPv4 aktivieren (Toggle einschalten)
+→ SSH Key hochladen
+→ Region: Nürnberg (NBG1)
+→ Bestellen
+```
+
+### Scaling-Pfad (wenn nötig)
+
+| Phase           | Setup                          | Kosten/Monat |
+|-----------------|--------------------------------|--------------|
+| Alpha (jetzt)   | 1× CX33 (alles)                | €8.32        |
+| Wachstum        | CX33 DB + CX33 API (getrennt)  | €16.64       |
+| Scale           | CCX23 DB + CX43 API            | ~€35         |
+
+---
+
+## 3. Phase 0 – Server Grundsetup (Tag 1–2)
+
+### 3.1 Erster Login & User anlegen
+
+```bash
+ssh -i ~/.ssh/hetzner_vps root@DEINE_VPS_IP
+
+adduser deploy
+usermod -aG sudo deploy
+
+mkdir -p /home/deploy/.ssh
+cp /root/.ssh/authorized_keys /home/deploy/.ssh/
+chown -R deploy:deploy /home/deploy/.ssh
+chmod 700 /home/deploy/.ssh && chmod 600 /home/deploy/.ssh/authorized_keys
+```
+
+### 3.2 SSH absichern
+
+```bash
+nano /etc/ssh/sshd_config
+# PermitRootLogin no
+# PasswordAuthentication no
+# PubkeyAuthentication yes
+
+systemctl restart sshd
+```
+
+### 3.3 Lokale SSH-Config
+
+```
+# ~/.ssh/config
+Host vps
+  HostName DEINE_VPS_IP
+  User deploy
+  IdentityFile ~/.ssh/hetzner_vps
+```
+
+Ab jetzt reicht: `ssh vps`
+
+### 3.4 Firewall
+
+```bash
+sudo apt install ufw -y
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+```
+
+### 3.5 Software installieren
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y curl git unzip build-essential fail2ban
+
+# Node.js (via nvm)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+source ~/.bashrc
+nvm install --lts && nvm use --lts
+
+# PM2
+npm install -g pm2
+pm2 startup
+
+# PostgreSQL 16
+sudo apt install -y postgresql-16 postgresql-contrib
+
+# PgBouncer
+sudo apt install -y pgbouncer
+
+# Caddy
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install caddy
+
+# rclone
+curl https://rclone.org/install.sh | sudo bash
+
+# Unattended Security Updates
+sudo apt install -y unattended-upgrades
+sudo dpkg-reconfigure --priority=low unattended-upgrades
+```
+
+### 3.6 Fail2ban
+
+```bash
+sudo systemctl enable fail2ban
+sudo systemctl start fail2ban
+```
+
+---
+
+## 4. Phase 1 – Datenbank Setup (Woche 1–2)
+
+> **Wichtig – v3.0 Ansatz:**
+> Da keine echten Userdaten existieren, behandeln wir die DB als **frischen Start**.
+> Kein Lazy-Migration-Flow. Kein Null-Password-Hash. Alles sauber von Anfang an.
+> Supabase Schema wird **nur strukturell** exportiert (Tabellen, Typen, Constraints) –
+> keine Daten. Danach neue Auth-Tabellen und Strukturanpassungen drauf.
+
+---
+
+### 4.1 PostgreSQL konfigurieren
+
+```bash
+# Superuser Passwort setzen
+sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'SICHERES_POSTGRES_PASSWORT';"
+
+# Prüfen: nur lokal erreichbar (Standard und soll so bleiben)
+sudo grep "listen_addresses" /etc/postgresql/16/main/postgresql.conf
+# → listen_addresses = 'localhost'
+```
+
+---
+
+### 4.2 Datenbanken & User anlegen
+
+```sql
+sudo -u postgres psql
+
+-- FreyOne Produktionsdatenbank
+CREATE USER freyone_api WITH PASSWORD 'SICHERES_PASSWORT_1';
+CREATE DATABASE freyone_prod OWNER freyone_api;
+GRANT CONNECT ON DATABASE freyone_prod TO freyone_api;
+
+-- Company interne Datenbank
+CREATE USER company_app WITH PASSWORD 'SICHERES_PASSWORT_2';
+CREATE DATABASE company_internal OWNER company_app;
+GRANT CONNECT ON DATABASE company_internal TO company_app;
+
+-- Read-Only (Steuerberater / Reporting)
+CREATE USER company_readonly WITH PASSWORD 'SICHERES_PASSWORT_3';
+GRANT CONNECT ON DATABASE company_internal TO company_readonly;
+
+-- Rechte: freyone_prod
+\c freyone_prod
+GRANT USAGE ON SCHEMA public TO freyone_api;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO freyone_api;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO freyone_api;
+
+-- Rechte: company_internal
+\c company_internal
+GRANT USAGE ON SCHEMA public TO company_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO company_app;
+GRANT USAGE ON SCHEMA public TO company_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO company_readonly;
+```
+
+**Isolation:**
+
+| User             | freyone_prod | company_internal    |
+|------------------|--------------|---------------------|
+| freyone_api      | ✅ Vollzugriff | ❌ kein Zugriff     |
+| company_app      | ❌ kein Zugriff | ✅ Vollzugriff      |
+| company_readonly | ❌ kein Zugriff | ✅ nur SELECT       |
+| postgres         | ✅ alles       | ✅ alles (via SSH)  |
+
+---
+
+### 4.3 Schema von Supabase exportieren (nur Struktur)
+
+```bash
+# Lokal ausführen – NUR Schema, KEINE Daten (--schema-only)
+supabase db dump \
+  --db-url "postgresql://postgres:PW@db.xyz.supabase.co:5432/postgres" \
+  --schema-only \
+  -f supabase_schema_only.sql
+
+# Auf VPS übertragen
+scp supabase_schema_only.sql vps:/home/deploy/
+
+# Auf VPS importieren (leere Tabellen, keine User-Daten)
+psql -U freyone_api -d freyone_prod < /home/deploy/supabase_schema_only.sql
+```
+
+> Supabase-spezifische Extensions (uuid-ossp, pgcrypto etc.) prüfen und ggf. aktivieren:
+> ```sql
+> CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+> CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+> CREATE EXTENSION IF NOT EXISTS "pg_trgm";   -- für Full-Text-Suche
+> ```
+
+---
+
+### 4.4 Neue Auth-Tabellen
+
+> Da kein User migriert wird, ist `password_hash` **NOT NULL** – jeder User setzt sein
+> Passwort beim ersten Registrieren. Kein Null-Hash, kein Reset-Flow für Altdaten.
+
+#### users (ersetzt Supabase Auth komplett)
+
+```sql
+CREATE TABLE users (
+  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  email          TEXT        UNIQUE NOT NULL,
+  password_hash  TEXT        NOT NULL,      -- bcrypt, Cost 12 – NIEMALS Klartext
+  role           TEXT        NOT NULL DEFAULT 'customer'
+                               CHECK (role IN ('customer', 'provider', 'admin')),
+  email_verified BOOLEAN     NOT NULL DEFAULT FALSE,
+  is_banned      BOOLEAN     NOT NULL DEFAULT FALSE,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON COLUMN users.password_hash IS 'bcrypt hash, cost 12. Klartext wird niemals gespeichert.';
+COMMENT ON COLUMN users.role IS 'customer | provider | admin';
+```
+
+#### refresh_tokens (mit Reuse-Detection)
+
+```sql
+CREATE TABLE refresh_tokens (
+  id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash   TEXT        NOT NULL,    -- SHA-256 Hash des tatsächlichen Tokens
+  user_agent   TEXT,                   -- Gerät/Browser für Audit
+  ip_address   INET,                   -- IP für Audit
+  expires_at   TIMESTAMPTZ NOT NULL,
+  replaced_by  UUID        REFERENCES refresh_tokens(id),  -- Reuse-Schutz: wenn gesetzt = Token gestohlen
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON COLUMN refresh_tokens.replaced_by IS
+  'Wenn nicht NULL: dieser Token wurde rotiert. Wird replaced_by ein zweites Mal benutzt, ist der Token gestohlen.';
+```
+
+#### password_resets
+
+```sql
+CREATE TABLE password_resets (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash  TEXT        NOT NULL,    -- SHA-256 des Reset-Links-Tokens
+  expires_at  TIMESTAMPTZ NOT NULL,
+  used_at     TIMESTAMPTZ,             -- NULL = noch nicht benutzt
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+> **email_otp_codes** – bereits in der bestehenden Schemastruktur vorhanden.
+> Wird wiederverwendet für Email-Verifizierung beim Registrieren.
+> Keine neue Tabelle nötig.
+
+---
+
+### 4.5 `provider_profiles` → Vollständige Spalten-Aufteilung
+
+Die Tabelle `provider_profiles` hat **69 Spalten**. Sie wird aufgeteilt in:
+- `provider_profiles` behält **47 Spalten** (Hot Path: Listing, Suche, Buchung, Payment)
+- `provider_business_details` erhält **22 Spalten** (Cold Path: Legal, Tax, Onboarding, Finanz)
+
+#### 47 Spalten – BLEIBEN in `provider_profiles`
+
+Diese Spalten werden bei Listings, Suche, Buchungsflow und Stripe täglich abgefragt.
+
+| Spalte                              | Typ             | Warum hier     |
+|-------------------------------------|-----------------|----------------|
+| `id`                                | UUID PK         | Primärschlüssel |
+| `user_id`                           | UUID FK         | → profiles/users |
+| `business_name`                     | TEXT NOT NULL   | Listing |
+| `business_slug`                     | TEXT?           | URL-Handle |
+| `business_description`              | TEXT?           | Listing |
+| `short_description`                 | TEXT?           | Listing (Karte) |
+| `business_email`                    | TEXT?           | Kontakt |
+| `business_email_verified`           | BOOLEAN?        | Verifizierungsstatus |
+| `business_email_verification_sent_at` | TIMESTAMPTZ?  | Verifizierung |
+| `business_phone_number`             | TEXT?           | Kontakt |
+| `business_phone_verified`           | BOOLEAN?        | Verifizierungsstatus |
+| `business_is_verified`              | BOOLEAN?        | Admin-Badge |
+| `account_is_active`                 | BOOLEAN NOT NULL | Buchungsflow-Guard |
+| `can_accept_bookings`               | BOOLEAN NOT NULL | Buchungsflow-Guard |
+| `is_profile_complete`               | BOOLEAN?        | Onboarding-Status |
+| `has_first_service`                 | BOOLEAN?        | Onboarding-Status |
+| `has_payment_method`                | BOOLEAN?        | Payment-Guard |
+| `profile_picture_url`               | TEXT?           | Listing |
+| `logo_url`                          | TEXT?           | Listing |
+| `average_rating`                    | NUMERIC NOT NULL | Listing/Sortierung |
+| `total_ratings`                     | INT NOT NULL    | Listing/Sortierung |
+| `total_bookings`                    | INT NOT NULL    | Listing/Sortierung |
+| `latitude`                          | NUMERIC?        | Geo-Suche |
+| `longitude`                         | NUMERIC?        | Geo-Suche |
+| `country`                           | TEXT NOT NULL   | Geo |
+| `state`                             | TEXT?           | Geo |
+| `district`                          | TEXT?           | Geo |
+| `location_type`                     | TEXT?           | Listing-Filter |
+| `service_area_type`                 | TEXT?           | Listing-Filter |
+| `service_cities`                    | TEXT[]?         | Listing-Filter |
+| `service_radius_km`                 | NUMERIC?        | Geo-Suche |
+| `primary_category_id`               | UUID?           | Listing/Suche |
+| `secondary_category_id`             | UUID?           | Listing/Suche |
+| `tags`                              | TEXT[]?         | Suche/Filter |
+| `working_hours`                     | JSON?           | Verfügbarkeit |
+| `cancellation_policy`               | TEXT?           | Buchungsflow |
+| `age_restriction`                   | INT?            | Buchungsflow |
+| `is_small_business`                 | BOOLEAN NOT NULL | Tax/Payment |
+| `financial_access_paused`           | BOOLEAN NOT NULL | Admin-Sperre |
+| `onboarding_completed_at`           | TIMESTAMPTZ?    | Onboarding |
+| `stripe_account_id`                 | TEXT?           | Payment |
+| `stripe_charges_enabled`            | BOOLEAN NOT NULL | Payment-Guard |
+| `stripe_payouts_enabled`            | BOOLEAN NOT NULL | Payment-Guard |
+| `stripe_verified_user`              | BOOLEAN?        | Payment |
+| `stripe_connect_deadline`           | TIMESTAMPTZ?    | Payment |
+| `created_at`                        | TIMESTAMPTZ NOT NULL | — |
+| `updated_at`                        | TIMESTAMPTZ NOT NULL | — |
+
+#### 22 Spalten – ZIEHEN UM nach `provider_business_details`
+
+Diese Spalten werden nur beim Onboarding, in Admin-Views oder vom Steuerberater gebraucht.
+Kein einziger Listing- oder Buchungs-Query braucht sie.
+
+| Spalte                         | Typ          | Kategorie         |
+|--------------------------------|--------------|-------------------|
+| `business_tax_number`          | TEXT?        | Legal / Tax       |
+| `business_vat_number`          | TEXT?        | Legal / Tax       |
+| `business_court_registration`  | TEXT?        | Legal             |
+| `is_business_registered`       | BOOLEAN?     | Legal             |
+| `business_type`                | TEXT?        | Legal (enum: `einzelunternehmen` \| `gbr` \| `gmbh` \| `ug` \| `freelancer` \| `other`) |
+| `certificates`                 | JSON?        | Legal / Docs      |
+| `license_documents`            | JSON?        | Legal / Docs      |
+| `impressum`                    | TEXT?        | Legal / Texte     |
+| `privacy_policy`               | TEXT?        | Legal / Texte     |
+| `terms_conditions`             | TEXT?        | Legal / Texte     |
+| `business_street`              | TEXT?        | Geschäftsadresse  |
+| `business_house_number`        | TEXT?        | Geschäftsadresse  |
+| `business_city`                | TEXT?        | Geschäftsadresse  |
+| `business_postal_code`         | TEXT?        | Geschäftsadresse  |
+| `address_line2`                | TEXT?        | Geschäftsadresse  |
+| `owner_first_name`             | TEXT NOT NULL | Stripe KYC        |
+| `owner_last_name`              | TEXT NOT NULL | Stripe KYC        |
+| `owner_date_of_birth`          | TEXT?        | Stripe KYC        |
+| `accepted_provider_terms_at`   | TIMESTAMPTZ? | Onboarding        |
+| `invoice_settings`             | JSON?        | Finanz / Admin    |
+| `payout_schedule`              | TEXT?        | Finanz / Admin    |
+| `minimum_payout_amount`        | NUMERIC?     | Finanz / Admin    |
+
+**Summe:** 47 + 22 = **69 Spalten** ✓
+
+---
+
+### 4.6 SQL: `provider_business_details` anlegen + Daten migrieren + Spalten droppen
+
+> Da die DB frisch ist (keine Produktionsdaten), sind Migration und Drop ein einzelner Block.
+> Bei einer DB mit Daten würde man zuerst die Daten rüber-INSERTen, dann droppen.
+
+```sql
+-- Schritt 1: Neue Tabelle anlegen
+CREATE TABLE provider_business_details (
+  provider_profile_id UUID PRIMARY KEY
+    REFERENCES provider_profiles(id) ON DELETE CASCADE,
+
+  -- Legal & Tax
+  business_tax_number         TEXT,
+  business_vat_number         TEXT,
+  business_court_registration TEXT,
+  is_business_registered      BOOLEAN,
+  business_type               TEXT,   -- einzelunternehmen | gbr | gmbh | ug | freelancer | other
+
+  -- Dokumente
+  certificates                JSON,
+  license_documents           JSON,
+
+  -- Legal Texte (werden selten abgefragt, können groß sein)
+  impressum                   TEXT,
+  privacy_policy              TEXT,
+  terms_conditions            TEXT,
+
+  -- Registrierte Geschäftsadresse (≠ Servicestandort in provider_profiles)
+  business_street             TEXT,
+  business_house_number       TEXT,
+  business_city               TEXT,
+  business_postal_code        TEXT,
+  address_line2               TEXT,
+
+  -- Inhaber-Daten (nur für Stripe KYC, nie user-facing)
+  owner_first_name            TEXT NOT NULL DEFAULT '',  -- NOT NULL wie in provider_profiles
+  owner_last_name             TEXT NOT NULL DEFAULT '',  -- NOT NULL wie in provider_profiles
+  owner_date_of_birth         TEXT,
+
+  -- Onboarding
+  accepted_provider_terms_at  TIMESTAMPTZ,
+
+  -- Finanz-Settings (nur Admin / Steuerberater)
+  invoice_settings            JSON,
+  payout_schedule             TEXT,
+  minimum_payout_amount       NUMERIC,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Schritt 2: Für jeden existierenden Provider-Eintrag einen Detail-Eintrag anlegen
+-- (Da frische DB: nur die Struktur, keine echten Daten)
+-- Bei Daten: INSERT INTO provider_business_details SELECT ... FROM provider_profiles;
+
+-- Schritt 3: Spalten aus provider_profiles droppen
+ALTER TABLE provider_profiles
+  DROP COLUMN IF EXISTS business_tax_number,
+  DROP COLUMN IF EXISTS business_vat_number,
+  DROP COLUMN IF EXISTS business_court_registration,
+  DROP COLUMN IF EXISTS is_business_registered,
+  DROP COLUMN IF EXISTS business_type,
+  DROP COLUMN IF EXISTS certificates,
+  DROP COLUMN IF EXISTS license_documents,
+  DROP COLUMN IF EXISTS impressum,
+  DROP COLUMN IF EXISTS privacy_policy,
+  DROP COLUMN IF EXISTS terms_conditions,
+  DROP COLUMN IF EXISTS business_street,
+  DROP COLUMN IF EXISTS business_house_number,
+  DROP COLUMN IF EXISTS business_city,
+  DROP COLUMN IF EXISTS business_postal_code,
+  DROP COLUMN IF EXISTS address_line2,
+  DROP COLUMN IF EXISTS owner_first_name,
+  DROP COLUMN IF EXISTS owner_last_name,
+  DROP COLUMN IF EXISTS owner_date_of_birth,
+  DROP COLUMN IF EXISTS accepted_provider_terms_at,
+  DROP COLUMN IF EXISTS invoice_settings,
+  DROP COLUMN IF EXISTS payout_schedule,
+  DROP COLUMN IF EXISTS minimum_payout_amount;
+```
+
+**Wie im Backend joinen (wenn nötig):**
+```sql
+-- Nur bei Onboarding / Admin / Steuerberater:
+SELECT pp.*, pbd.*
+FROM provider_profiles pp
+LEFT JOIN provider_business_details pbd ON pbd.provider_profile_id = pp.id
+WHERE pp.id = $1;
+
+-- Normaler Listing-Query: kein JOIN, kein Overhead
+SELECT * FROM provider_profiles WHERE id = $1;
+```
+
+---
+
+### 4.7 `profiles` → FK Constraint zu `users`
+
+```sql
+-- profiles.id und users.id teilen dieselbe UUID
+-- Registrierung erstellt ZUERST users, DANN profiles (in einer Transaction)
+
+ALTER TABLE profiles
+  ADD CONSTRAINT fk_profiles_users
+  FOREIGN KEY (id) REFERENCES users(id) ON DELETE CASCADE;
+```
+
+> **Wichtig – Überlappende Felder:**
+> Sowohl `users` als auch `profiles` haben `email`, `email_verified`, `is_banned`.
+> **Source of Truth ist immer `users`.**
+> Die Felder in `profiles` bleiben für Backward-Compat bis alle API-Queries
+> auf `users` umgestellt sind – dann Spalten aus `profiles` droppen.
+
+| Feld             | Source of Truth | `profiles` Spalte |
+|------------------|-----------------|-------------------|
+| `email`          | `users.email`   | Redundant → droppen nach Migration |
+| `email_verified` | `users.email_verified` | Redundant → droppen nach Migration |
+| `is_banned`      | `users.is_banned` | Redundant → droppen nach Migration |
+
+---
+
+### 4.8 PostgreSQL Triggers
+
+```sql
+-- updated_at automatisch setzen
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Auf alle relevanten Tabellen anwenden
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON users
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON profiles
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON provider_profiles
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON provider_business_details
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON bookings
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON services
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON invoices
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- Atomares Claim für Cron Jobs (Race Condition Schutz)
+CREATE OR REPLACE FUNCTION claim_next_pending(p_table TEXT)
+RETURNS TABLE(id UUID, data JSONB) AS $$
+BEGIN
+  RETURN QUERY EXECUTE format('
+    UPDATE %I SET status = ''processing'', claimed_at = NOW()
+    WHERE id = (
+      SELECT id FROM %I WHERE status = ''pending''
+      ORDER BY created_at ASC LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, to_jsonb(%I.*) AS data
+  ', p_table, p_table, p_table);
+END;
+$$ LANGUAGE plpgsql;
+```
+
+---
+
+### 4.9 Alle Indexes
+
+Alle ohne `CONCURRENTLY` (leere DB beim initialen Setup – geht direkt).
+
+```sql
+-- ────────────────────────────────────────────────
+-- BOOKINGS
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_bookings_provider_status
+  ON bookings(provider_id, status);
+
+CREATE INDEX idx_bookings_customer_status
+  ON bookings(customer_id, status);
+
+CREATE INDEX idx_bookings_status_date
+  ON bookings(status, booking_date);
+
+CREATE INDEX idx_bookings_service
+  ON bookings(service_id);
+
+CREATE INDEX idx_bookings_payment_intent
+  ON bookings(payment_intent_id)
+  WHERE payment_intent_id IS NOT NULL;
+
+CREATE INDEX idx_bookings_active
+  ON bookings(provider_id, booking_date DESC)
+  WHERE status IN ('pending', 'confirmed');
+
+-- ────────────────────────────────────────────────
+-- NOTIFICATIONS
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_notifications_inbox
+  ON notifications(user_id, created_at DESC);
+
+CREATE INDEX idx_notifications_unread
+  ON notifications(user_id, created_at DESC)
+  WHERE read = FALSE OR read IS NULL;
+
+-- ────────────────────────────────────────────────
+-- MESSAGES & CONVERSATIONS
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_messages_thread
+  ON messages(conversation_id, created_at DESC);
+
+CREATE UNIQUE INDEX idx_conversations_pair
+  ON conversations(customer_id, provider_id);
+
+CREATE INDEX idx_conversations_provider
+  ON conversations(provider_id, last_message_at DESC);
+
+CREATE INDEX idx_conversations_customer
+  ON conversations(customer_id, last_message_at DESC);
+
+-- ────────────────────────────────────────────────
+-- SERVICES
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_services_provider_active
+  ON services(provider_id, is_active);
+
+CREATE INDEX idx_services_category
+  ON services(category_id)
+  WHERE is_active = TRUE;
+
+CREATE INDEX idx_services_fts
+  ON services USING gin(search_vector);
+
+CREATE INDEX idx_services_tags
+  ON services USING gin(tags);
+
+-- ────────────────────────────────────────────────
+-- SEARCH_INDEX
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_search_de
+  ON search_index USING gin(search_vector_de);
+
+CREATE INDEX idx_search_en
+  ON search_index USING gin(search_vector_en);
+
+CREATE INDEX idx_search_tags
+  ON search_index USING gin(tags);
+
+CREATE INDEX idx_search_active_rating
+  ON search_index(rating DESC, total_bookings DESC)
+  WHERE is_active = TRUE AND can_accept_bookings = TRUE;
+
+-- ────────────────────────────────────────────────
+-- PROVIDER_PROFILES
+-- ────────────────────────────────────────────────
+CREATE UNIQUE INDEX idx_provider_slug
+  ON provider_profiles(business_slug)
+  WHERE business_slug IS NOT NULL;
+
+CREATE INDEX idx_provider_user
+  ON provider_profiles(user_id);
+
+CREATE INDEX idx_provider_active_rating
+  ON provider_profiles(average_rating DESC)
+  WHERE account_is_active = TRUE AND can_accept_bookings = TRUE;
+
+CREATE INDEX idx_provider_category
+  ON provider_profiles(primary_category_id, average_rating DESC)
+  WHERE account_is_active = TRUE;
+
+-- ────────────────────────────────────────────────
+-- PROFILES
+-- ────────────────────────────────────────────────
+CREATE UNIQUE INDEX idx_profiles_url_token
+  ON profiles(url_token)
+  WHERE url_token IS NOT NULL;
+
+CREATE INDEX idx_profiles_stripe
+  ON profiles(stripe_customer_id)
+  WHERE stripe_customer_id IS NOT NULL;
+
+-- ────────────────────────────────────────────────
+-- REVIEWS
+-- ────────────────────────────────────────────────
+CREATE UNIQUE INDEX idx_reviews_booking
+  ON reviews(booking_id);
+
+CREATE INDEX idx_reviews_provider
+  ON reviews(provider_id, created_at DESC);
+
+-- ────────────────────────────────────────────────
+-- PAYMENT_INTENTS
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_payment_intents_booking
+  ON payment_intents(booking_id);
+
+CREATE UNIQUE INDEX idx_payment_intents_stripe
+  ON payment_intents(stripe_payment_intent_id);
+
+-- ────────────────────────────────────────────────
+-- PAYMENTS
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_payments_booking
+  ON payments(booking_id)
+  WHERE booking_id IS NOT NULL;
+
+CREATE UNIQUE INDEX idx_payments_stripe
+  ON payments(stripe_payment_intent_id)
+  WHERE stripe_payment_intent_id IS NOT NULL;
+
+CREATE INDEX idx_payments_provider
+  ON payments(provider_id, status, created_at DESC)
+  WHERE provider_id IS NOT NULL;
+
+-- ────────────────────────────────────────────────
+-- INVOICES
+-- ────────────────────────────────────────────────
+CREATE UNIQUE INDEX idx_invoices_number
+  ON invoices(invoice_number);
+
+CREATE INDEX idx_invoices_booking
+  ON invoices(booking_id)
+  WHERE booking_id IS NOT NULL;
+
+CREATE INDEX idx_invoices_provider
+  ON invoices(provider_id, status, created_at DESC);
+
+-- ────────────────────────────────────────────────
+-- AVAILABILITY_TEMPLATES
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_availability_provider_day
+  ON availability_templates(provider_profile_id, day_of_week)
+  WHERE is_active = TRUE OR is_active IS NULL;
+
+-- ────────────────────────────────────────────────
+-- BLOCKED_CUSTOMERS
+-- ────────────────────────────────────────────────
+CREATE UNIQUE INDEX idx_blocked_pair
+  ON blocked_customers(provider_id, customer_id);
+
+-- ────────────────────────────────────────────────
+-- QUOTES
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_quotes_provider
+  ON quotes(provider_id, status);
+
+CREATE INDEX idx_quotes_customer
+  ON quotes(customer_id, status);
+
+-- ────────────────────────────────────────────────
+-- ACTIVITY_LOGS
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_activity_logs_user
+  ON activity_logs(user_id, created_at DESC)
+  WHERE user_id IS NOT NULL;
+
+CREATE INDEX idx_activity_logs_entity
+  ON activity_logs(entity_id, entity_type)
+  WHERE entity_id IS NOT NULL;
+
+-- ────────────────────────────────────────────────
+-- AUTH (neue Tabellen)
+-- ────────────────────────────────────────────────
+CREATE INDEX idx_users_email
+  ON users(email);    -- email ist bereits UNIQUE, trotzdem explizit für Lookup-Speed
+
+CREATE INDEX idx_refresh_tokens_user
+  ON refresh_tokens(user_id);
+
+CREATE INDEX idx_refresh_tokens_cleanup
+  ON refresh_tokens(expires_at)
+  WHERE replaced_by IS NULL;  -- nur aktive Tokens beim Cleanup scannen
+
+CREATE INDEX idx_password_resets_user
+  ON password_resets(user_id)
+  WHERE used_at IS NULL;      -- nur offene Resets
+```
+
+---
+
+### 4.10 PostgreSQL Tuning (postgresql.conf – CX33 spezifisch)
+
+> Angepasst auf 8 GB RAM, 4 vCPU, SSD. Einmalig setzen, dann `reload`.
+
+```ini
+# /etc/postgresql/16/main/postgresql.conf
+
+# ── Memory ────────────────────────────────────────────
+shared_buffers               = 2GB      # 25% des RAMs
+effective_cache_size         = 6GB      # 75% des RAMs
+work_mem                     = 64MB     # pro Sort/Hash – bei 200 Connections max ~12 GB
+maintenance_work_mem         = 512MB    # für VACUUM, REINDEX
+wal_buffers                  = 64MB
+
+# ── Checkpoint ────────────────────────────────────────
+checkpoint_completion_target = 0.9
+min_wal_size                 = 256MB
+max_wal_size                 = 2GB
+
+# ── SSD-spezifisch (Standard ist 4.0 = HDD) ──────────
+random_page_cost             = 1.1
+effective_io_concurrency     = 200
+
+# ── Parallelism (= vCPU Anzahl) ───────────────────────
+max_worker_processes         = 4
+max_parallel_workers         = 4
+max_parallel_workers_per_gather = 2
+
+# ── Autovacuum (aggressiver als Standard) ─────────────
+autovacuum_vacuum_scale_factor  = 0.05
+autovacuum_analyze_scale_factor = 0.02
+autovacuum_vacuum_cost_limit    = 400
+```
+
+```bash
+# Anwenden ohne Neustart
+sudo systemctl reload postgresql
+```
+
+---
+
+### 4.11 Per-Table Autovacuum (Hot Tables)
+
+Diese drei Tabellen wachsen am schnellsten – aggressivere Schwellwerte verhindern Table Bloat.
+
+```sql
+-- bookings: viele Status-Updates
+ALTER TABLE bookings SET (
+  autovacuum_vacuum_scale_factor  = 0.01,
+  autovacuum_analyze_scale_factor = 0.005
+);
+
+-- notifications: wird massenhaft geschrieben und gelesen
+ALTER TABLE notifications SET (
+  autovacuum_vacuum_scale_factor  = 0.02,
+  autovacuum_analyze_scale_factor = 0.01
+);
+
+-- messages: Echtzeit-Schreibrate
+ALTER TABLE messages SET (
+  autovacuum_vacuum_scale_factor  = 0.02,
+  autovacuum_analyze_scale_factor = 0.01
+);
+```
+
+---
+
+### 4.12 PgBouncer konfigurieren
+
+```ini
+# /etc/pgbouncer/pgbouncer.ini
+[databases]
+freyone_prod     = host=localhost port=5432 dbname=freyone_prod
+company_internal = host=localhost port=5432 dbname=company_internal
+
+[pgbouncer]
+listen_port      = 6432
+listen_addr      = localhost
+pool_mode        = transaction
+max_client_conn  = 200
+default_pool_size = 20
+auth_type        = scram-sha-256
+auth_file        = /etc/pgbouncer/userlist.txt
+```
+
+Backend verbindet sich **immer** über Port **6432** (PgBouncer). Nie direkt auf 5432.
+
+```typescript
+// db/client.ts
+DATABASE_URL=postgresql://freyone_api:PW@localhost:6432/freyone_prod
+```
+
+---
+
+### 4.13 Laptop-Zugriff via SSH-Tunnel
+
+```bash
+# Tunnel aufbauen (läuft im Hintergrund)
+ssh -L 5433:localhost:6432 vps -N &
+
+# TablePlus / DBeaver verbinden:
+# Host: localhost | Port: 5433 | User: freyone_api | DB: freyone_prod
+```
+
+---
+
+### 4.14 Init-Reihenfolge (einmalig, auf dem VPS)
+
+```bash
+# 1. Extensions aktivieren
+psql -U freyone_api -d freyone_prod -c "
+  CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";
+  CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";
+  CREATE EXTENSION IF NOT EXISTS \"pg_trgm\";
+"
+
+# 2. Supabase-Struktur importieren (nur Schema, keine Daten)
+psql -U freyone_api -d freyone_prod < /home/deploy/supabase_schema_only.sql
+
+# 2.5 Die DB-Migration conversations.provider_id DROP NOT NULL muss in den Migrationsplan — konkret in Abschnitt 4.14 (Init-Reihenfolge), direkt nach dem Schema-Import:
+sql-- In /home/deploy/sql/schema_fixes.sql
+-- Fix: provider_id in conversations ist bei Support-Tickets NULL (kein Provider beteiligt)
+ALTER TABLE conversations ALTER COLUMN provider_id DROP NOT NULL;
+Und in die Finale Checkliste unter Phase 1 ergänzen:
+
+ conversations.provider_id auf nullable geändert (Support-Ticket Fix)
+
+Das muss vor dem ersten Test passieren, sonst scheitert der Support-Flow sofort beim Go-Live.
+
+# 3. provider_business_details anlegen + Spalten aus provider_profiles droppen
+psql -U freyone_api -d freyone_prod < /home/deploy/sql/split_provider_profiles.sql
+
+# 4. Auth-Tabellen anlegen (users, refresh_tokens, password_resets)
+psql -U freyone_api -d freyone_prod < /home/deploy/sql/auth_tables.sql
+
+# 5. FK Constraint profiles → users
+psql -U freyone_api -d freyone_prod < /home/deploy/sql/profiles_fk.sql
+
+# 6. Alle Indexes
+psql -U freyone_api -d freyone_prod < /home/deploy/sql/indexes.sql
+
+# 7. Triggers
+psql -U freyone_api -d freyone_prod < /home/deploy/sql/triggers.sql
+
+# 8. PostgreSQL Config neu laden
+sudo systemctl reload postgresql
+
+# 9. Per-Table Autovacuum
+psql -U freyone_api -d freyone_prod < /home/deploy/sql/autovacuum_tuning.sql
+
+# 10. PgBouncer starten
+sudo systemctl enable pgbouncer && sudo systemctl start pgbouncer
+
+# Verifizierung
+psql -U freyone_api -d freyone_prod -c "\dt"          # alle Tabellen listen
+psql -U freyone_api -d freyone_prod -c "\d users"     # Auth-Tabelle prüfen
+psql -U freyone_api -d freyone_prod -c "\d provider_profiles" # noch 47 Spalten?
+psql -U freyone_api -d freyone_prod -c "\d provider_business_details"
+```
+
+---
+
+## 5. Phase 2 – Node.js Backend (Woche 2–4)
+
+### 5.1 Dependencies (minimal)
+
+```json
+{
+  "dependencies": {
+    "hono": "^4.x",
+    "@hono/node-server": "^1.x",
+    "postgres": "^3.x",
+    "bcryptjs": "^2.x",
+    "jsonwebtoken": "^9.x",
+    "node-cron": "^3.x",
+    "zod": "^3.x",
+    "resend": "^4.x"
+  },
+  "devDependencies": {
+    "typescript": "^5.x",
+    "@types/node": "^22.x",
+    "@types/bcryptjs": "^2.x",
+    "@types/jsonwebtoken": "^9.x"
+  }
+}
+```
+
+Kein ORM. Kein Express. Direktes SQL über `postgres` Package.
+
+### 5.2 Projektstruktur
+
+```
+apps/api/
+  src/
+    routes/
+      auth.ts           ← Register, Login, Refresh, Logout, Forgot, Reset
+      bookings.ts
+      providers.ts
+      payments.ts
+      admin.ts
+    crons/
+      index.ts
+      jobs/
+    middleware/
+      auth.ts           ← JWT Validation
+      rateLimit.ts
+      cors.ts
+    db/
+      client.ts         ← postgres connection via PgBouncer
+      queries/
+    utils/
+      jwt.ts
+      hash.ts           ← bcrypt Wrapper
+      tokens.ts         ← Refresh Token Helpers
+      mailer.ts
+    index.ts
+  ecosystem.config.js
+  tsconfig.json
+```
+
+### 5.3 Sichere Auth-Implementierung
+
+#### hash.ts – Passwörter hashen (bcrypt, Cost 12)
+
+```typescript
+// src/utils/hash.ts
+import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
+
+// Cost 12: ~400ms auf modernem Server – gut gegen Brute Force
+// Cost 10 = ~100ms (zu schnell), Cost 14 = ~1.6s (zu langsam für UX)
+const BCRYPT_COST = 12;
+
+export async function hashPassword(plaintext: string): Promise<string> {
+  // bcrypt.hash generiert automatisch einen zufälligen Salt
+  return bcrypt.hash(plaintext, BCRYPT_COST);
+}
+
+export async function verifyPassword(
+  plaintext: string,
+  hash: string
+): Promise<boolean> {
+  // Timing-sicherer Vergleich (verhindert Timing Attacks)
+  return bcrypt.compare(plaintext, hash);
+}
+
+// Für Refresh Tokens und Password Resets: SHA-256 des zufälligen Tokens
+export function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// Zufälliges Token erzeugen (URL-safe)
+export function generateToken(bytes = 64): string {
+  return crypto.randomBytes(bytes).toString('base64url');
+}
+```
+
+> **Warum nicht MD5/SHA für Passwörter?**
+> MD5 und SHA sind extrem schnell – eine GPU schafft Milliarden Hashes pro Sekunde.
+> bcrypt ist absichtlich langsam und hat einen eingebauten Salt.
+> Refresh-Token-Hashes mit SHA-256 sind ok, weil das Token selbst 64 Byte Zufallsentropie hat.
+
+#### jwt.ts – Access Token Strategie
+
+```typescript
+// src/utils/jwt.ts
+import jwt from 'jsonwebtoken';
+
+export interface JWTPayload {
+  userId: string;
+  role: 'customer' | 'provider' | 'admin';
+}
+
+// Access Token: 15 Minuten – kurze Lifetime schützt bei Leak
+export function signAccessToken(payload: JWTPayload): string {
+  return jwt.sign(payload, process.env.JWT_SECRET!, { expiresIn: '15m' });
+}
+
+// Verify wirft bei abgelaufenem oder manipuliertem Token
+export function verifyAccessToken(token: string): JWTPayload {
+  return jwt.verify(token, process.env.JWT_SECRET!) as JWTPayload;
+}
+```
+
+#### tokens.ts – Refresh Token Helpers
+
+```typescript
+// src/utils/tokens.ts
+import { generateToken, hashToken } from './hash';
+import { db } from '../db/client';
+
+const REFRESH_TOKEN_TTL_DAYS = 7;
+
+export async function createRefreshToken(
+  userId: string,
+  ipAddress: string,
+  userAgent: string
+): Promise<string> {
+  const rawToken = generateToken(64);       // 64 Byte = 512 Bit Entropie
+  const tokenHash = hashToken(rawToken);   // SHA-256 davon in DB
+
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + REFRESH_TOKEN_TTL_DAYS);
+
+  await db.none(`
+    INSERT INTO refresh_tokens (user_id, token_hash, ip_address, user_agent, expires_at)
+    VALUES ($1, $2, $3::inet, $4, $5)
+  `, [userId, tokenHash, ipAddress, userAgent, expiresAt]);
+
+  return rawToken; // Nur dieser eine Moment – danach nie wieder sichtbar
+}
+
+export async function rotateRefreshToken(
+  rawToken: string,
+  ipAddress: string,
+  userAgent: string
+): Promise<{ userId: string; newRawToken: string } | null> {
+  const incomingHash = hashToken(rawToken);
+
+  const existing = await db.oneOrNone(`
+    SELECT id, user_id, expires_at, replaced_by
+    FROM refresh_tokens
+    WHERE token_hash = $1
+  `, [incomingHash]);
+
+  // Token existiert nicht
+  if (!existing) return null;
+
+  // Token wurde bereits rotiert → Reuse-Angriff!
+  // Alle Tokens dieses Users invalidieren (Token-Familie kompromittiert)
+  if (existing.replaced_by) {
+    await db.none(`DELETE FROM refresh_tokens WHERE user_id = $1`, [existing.user_id]);
+    return null;
+  }
+
+  // Token abgelaufen
+  if (new Date(existing.expires_at) < new Date()) {
+    await db.none(`DELETE FROM refresh_tokens WHERE id = $1`, [existing.id]);
+    return null;
+  }
+
+  // Neues Token ausstellen
+  const newRawToken = generateToken(64);
+  const newHash = hashToken(newRawToken);
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + REFRESH_TOKEN_TTL_DAYS);
+
+  await db.tx(async t => {
+    // Neues Token einfügen
+    const newRecord = await t.one(`
+      INSERT INTO refresh_tokens (user_id, token_hash, ip_address, user_agent, expires_at)
+      VALUES ($1, $2, $3::inet, $4, $5)
+      RETURNING id
+    `, [existing.user_id, newHash, ipAddress, userAgent, expiresAt]);
+
+    // Altes Token als ersetzt markieren (für Reuse-Detection)
+    await t.none(`
+      UPDATE refresh_tokens SET replaced_by = $1 WHERE id = $2
+    `, [newRecord.id, existing.id]);
+  });
+
+  return { userId: existing.user_id, newRawToken };
+}
+```
+
+### 5.4 Auth Endpoints – vollständige Implementierung
+
+```typescript
+// src/routes/auth.ts
+import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
+import { setCookie, deleteCookie } from 'hono/cookie';
+import { db } from '../db/client';
+import {
+  hashPassword, verifyPassword,
+  generateToken, hashToken
+} from '../utils/hash';
+import {
+  signAccessToken, verifyAccessToken
+} from '../utils/jwt';
+import {
+  createRefreshToken, rotateRefreshToken
+} from '../utils/tokens';
+import { sendVerificationEmail, sendPasswordResetEmail } from '../utils/mailer';
+
+const auth = new Hono();
+
+// ─── POST /auth/register ─────────────────────────────────────────────────────
+const registerSchema = z.object({
+  email:     z.string().email().toLowerCase(),
+  password:  z.string().min(8).max(128),
+  firstName: z.string().min(1).max(100),
+  lastName:  z.string().min(1).max(100),
+});
+
+auth.post('/register', zValidator('json', registerSchema), async (c) => {
+  const { email, password, firstName, lastName } = c.req.valid('json');
+
+  // Existiert der User bereits?
+  const existing = await db.oneOrNone(
+    `SELECT id FROM users WHERE email = $1`, [email]
+  );
+  if (existing) {
+    // Gleiche Fehlermeldung wie bei nicht-existentem User (verhindert User-Enumeration)
+    return c.json({ message: 'Registrierung erfolgreich. Bitte E-Mail bestätigen.' }, 201);
+  }
+
+  const passwordHash = await hashPassword(password);
+
+  // users + profiles in einer Transaction – beide oder keins
+  const userId = await db.tx(async t => {
+    const user = await t.one(`
+      INSERT INTO users (email, password_hash, role)
+      VALUES ($1, $2, 'customer')
+      RETURNING id
+    `, [email, passwordHash]);
+
+    await t.none(`
+      INSERT INTO profiles (id, email, first_name, last_name)
+      VALUES ($1, $2, $3, $4)
+    `, [user.id, email, firstName, lastName]);
+
+    return user.id;
+  });
+
+  await sendVerificationEmail(userId, email);
+
+  return c.json({ message: 'Registrierung erfolgreich. Bitte E-Mail bestätigen.' }, 201);
+});
+
+// ─── POST /auth/login ────────────────────────────────────────────────────────
+const loginSchema = z.object({
+  email:    z.string().email().toLowerCase(),
+  password: z.string(),
+});
+
+auth.post('/login', zValidator('json', loginSchema), async (c) => {
+  const { email, password } = c.req.valid('json');
+  const ip = c.req.header('x-forwarded-for') ?? 'unknown';
+  const ua = c.req.header('user-agent') ?? '';
+
+  const user = await db.oneOrNone(`
+    SELECT id, password_hash, role, email_verified, is_banned
+    FROM users WHERE email = $1
+  `, [email]);
+
+  // Immer hashen, auch wenn User nicht existiert (verhindert Timing Attack)
+  const dummyHash = '$2b$12$invalidhashtopreventtimingattack.....';
+  const isValid = await verifyPassword(
+    password,
+    user?.password_hash ?? dummyHash
+  );
+
+  if (!user || !isValid) {
+    return c.json({ error: 'Ungültige E-Mail oder Passwort.' }, 401);
+  }
+
+  if (user.is_banned) {
+    return c.json({ error: 'Konto gesperrt.' }, 403);
+  }
+
+  if (!user.email_verified) {
+    return c.json({ error: 'E-Mail nicht bestätigt. Bitte zuerst verifizieren.' }, 403);
+  }
+
+  const accessToken = signAccessToken({ userId: user.id, role: user.role });
+  const refreshToken = await createRefreshToken(user.id, ip, ua);
+
+  // Refresh Token als httpOnly Cookie (nicht per JS auslesbar)
+  setCookie(c, 'refresh_token', refreshToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Strict',
+    maxAge: 60 * 60 * 24 * 7, // 7 Tage
+    path: '/auth/refresh',     // Cookie nur für diesen Pfad gesendet
+  });
+
+  return c.json({ accessToken, role: user.role });
+});
+
+// ─── POST /auth/refresh ──────────────────────────────────────────────────────
+auth.post('/refresh', async (c) => {
+  const { getCookie } = await import('hono/cookie');
+  const rawToken = getCookie(c, 'refresh_token');
+  if (!rawToken) return c.json({ error: 'Kein Refresh Token.' }, 401);
+
+  const ip = c.req.header('x-forwarded-for') ?? 'unknown';
+  const ua = c.req.header('user-agent') ?? '';
+
+  const result = await rotateRefreshToken(rawToken, ip, ua);
+  if (!result) {
+    deleteCookie(c, 'refresh_token');
+    return c.json({ error: 'Token ungültig oder abgelaufen.' }, 401);
+  }
+
+  const user = await db.one(
+    `SELECT role FROM users WHERE id = $1`, [result.userId]
+  );
+
+  const accessToken = signAccessToken({ userId: result.userId, role: user.role });
+
+  setCookie(c, 'refresh_token', result.newRawToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Strict',
+    maxAge: 60 * 60 * 24 * 7,
+    path: '/auth/refresh',
+  });
+
+  return c.json({ accessToken });
+});
+
+// ─── POST /auth/logout ───────────────────────────────────────────────────────
+auth.post('/logout', async (c) => {
+  const { getCookie } = await import('hono/cookie');
+  const rawToken = getCookie(c, 'refresh_token');
+
+  if (rawToken) {
+    const tokenHash = hashToken(rawToken);
+    // Token invalidieren (nicht nur Cookie löschen)
+    await db.none(
+      `DELETE FROM refresh_tokens WHERE token_hash = $1`, [tokenHash]
+    );
+  }
+
+  deleteCookie(c, 'refresh_token', { path: '/auth/refresh' });
+  return c.json({ message: 'Abgemeldet.' });
+});
+
+// ─── POST /auth/forgot-password ──────────────────────────────────────────────
+auth.post('/forgot-password', async (c) => {
+  const { email } = await c.req.json();
+
+  const user = await db.oneOrNone(
+    `SELECT id FROM users WHERE email = $1`, [email?.toLowerCase()]
+  );
+
+  // Immer gleiche Antwort – verhindert User-Enumeration
+  if (user) {
+    const rawToken = generateToken(32);
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 Stunde
+
+    // Alte Reset-Tokens invalidieren
+    await db.none(
+      `DELETE FROM password_resets WHERE user_id = $1 AND used_at IS NULL`,
+      [user.id]
+    );
+
+    await db.none(`
+      INSERT INTO password_resets (user_id, token_hash, expires_at)
+      VALUES ($1, $2, $3)
+    `, [user.id, tokenHash, expiresAt]);
+
+    await sendPasswordResetEmail(email, rawToken);
+  }
+
+  return c.json({ message: 'Falls die E-Mail existiert, wurde ein Reset-Link gesendet.' });
+});
+
+// ─── POST /auth/reset-password ───────────────────────────────────────────────
+const resetSchema = z.object({
+  token:    z.string(),
+  password: z.string().min(8).max(128),
+});
+
+auth.post('/reset-password', zValidator('json', resetSchema), async (c) => {
+  const { token, password } = c.req.valid('json');
+  const tokenHash = hashToken(token);
+
+  const reset = await db.oneOrNone(`
+    SELECT id, user_id FROM password_resets
+    WHERE token_hash = $1
+      AND used_at IS NULL
+      AND expires_at > NOW()
+  `, [tokenHash]);
+
+  if (!reset) return c.json({ error: 'Token ungültig oder abgelaufen.' }, 400);
+
+  const newHash = await hashPassword(password);
+
+  await db.tx(async t => {
+    await t.none(
+      `UPDATE users SET password_hash = $1 WHERE id = $2`,
+      [newHash, reset.user_id]
+    );
+    await t.none(
+      `UPDATE password_resets SET used_at = NOW() WHERE id = $1`,
+      [reset.id]
+    );
+    // Alle aktiven Refresh Tokens des Users invalidieren (Session-Reset nach PW-Änderung)
+    await t.none(
+      `DELETE FROM refresh_tokens WHERE user_id = $1`,
+      [reset.user_id]
+    );
+  });
+
+  return c.json({ message: 'Passwort erfolgreich geändert. Bitte neu einloggen.' });
+});
+
+export default auth;
+```
+
+### 5.5 Auth Middleware
+
+```typescript
+// src/middleware/auth.ts
+import { Context, Next } from 'hono';
+import { verifyAccessToken } from '../utils/jwt';
+
+export const authMiddleware = async (c: Context, next: Next) => {
+  const header = c.req.header('Authorization');
+  if (!header?.startsWith('Bearer ')) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  const token = header.replace('Bearer ', '');
+  try {
+    const payload = verifyAccessToken(token);
+    c.set('user', payload);
+    await next();
+  } catch {
+    return c.json({ error: 'Token ungültig oder abgelaufen.' }, 401);
+  }
+};
+
+// Role-based Guard
+export const requireRole = (roles: string[]) =>
+  async (c: Context, next: Next) => {
+    const user = c.get('user');
+    if (!roles.includes(user.role)) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+    await next();
+  };
+```
+
+### 5.6 Rate Limiting (Brute-Force-Schutz)
+
+```typescript
+// src/middleware/rateLimit.ts
+import { rateLimiter } from 'hono-rate-limiter';
+
+// Auth-Endpoints: max 10 Versuche in 15 Minuten
+export const authRateLimit = rateLimiter({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  keyGenerator: (c) =>
+    c.req.header('x-forwarded-for') ?? c.req.raw.socket?.remoteAddress ?? 'unknown',
+  message: { error: 'Zu viele Versuche. Bitte in 15 Minuten erneut versuchen.' },
+});
+
+// API-Endpoints: großzügiger
+export const apiRateLimit = rateLimiter({
+  windowMs: 60 * 1000,
+  limit: 100,
+});
+```
+
+```typescript
+// src/index.ts – Rate Limiter auf Auth-Routen anwenden
+app.use('/auth/login', authRateLimit);
+app.use('/auth/register', authRateLimit);
+app.use('/auth/forgot-password', authRateLimit);
+app.use('/auth/reset-password', authRateLimit);
+```
+
+### 5.7 .env Anforderungen
+
+```bash
+# /home/deploy/freyone/apps/api/.env
+
+DATABASE_URL=postgresql://freyone_api:PW@localhost:6432/freyone_prod
+
+# JWT – mindestens 256 Bit (32 Byte) zufälliger String
+# Generieren: openssl rand -base64 48
+JWT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Stripe
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+
+# E-Mail
+RESEND_API_KEY=re_...
+
+# Frontend URL (für E-Mail-Links)
+FRONTEND_URL=https://frey-one.com
+
+# Monitoring
+HC_5MIN_URL=https://hc-ping.com/uuid-1
+HC_DAILY_URL=https://hc-ping.com/uuid-2
+
+chmod 600 /home/deploy/freyone/apps/api/.env
+```
+
+### 5.8 Caddy Konfiguration (SSL automatisch)
+
+```
+# /etc/caddy/Caddyfile
+api.frey-one.com {
+    reverse_proxy localhost:3001
+}
+```
+
+### 5.9 PM2 Konfiguration
+
+```javascript
+// ecosystem.config.js
+module.exports = {
+  apps: [{
+    name: 'freyone-api',
+    script: './dist/index.js',
+    instances: 2,
+    exec_mode: 'cluster',
+    env_production: {
+      NODE_ENV: 'production',
+      PORT: 3001
+    }
+  }]
+}
+```
+
+---
+
+## 6. Phase 3 – Cron Jobs intern (Woche 3–4)
+
+**Vorher:** 21 Jobs auf cron-jobs.org → HTTP-Call auf Vercel → 30s Limit
+
+**Nachher:** 21 Jobs als node-cron intern im Backend → kein Limit, kein externer Aufruf
+
+### 6.1 Alle 21 Jobs nach Zeitplan
+
+| Job                      | Intervall   | DB-Queries |
+|--------------------------|-------------|------------|
+| translate                | 5 Min       | ~3–5       |
+| dsgvo-export             | 10 Min      | ~10–15     |
+| process-failed-emails    | 2 Std       | 3          |
+| check-service-limits     | 6 Std       | ~12        |
+| auto-complete-bookings   | 6 Std       | 2          |
+| booking-reminders        | täglich     | 5          |
+| check-connect-deadline   | täglich     | 2          |
+| check-provider-approvals | täglich     | 2          |
+| cleanup-old-records      | täglich     | 6          |
+| daily-report             | täglich     | 7          |
+| keep-company-alive       | –           | 2          |
+| platform-stats           | –           | 5          |
+| system-monitor           | –           | 8          |
+| health-check             | –           | ~5         |
+| notification-nudges      | –           | 4          |
+| check-temp-plan-expiry   | –           | ~4         |
+| monthly-financial        | monatlich   | 4          |
+| monthly-report           | monatlich   | 9          |
+| weekly-limit-report      | Mo 7:00     | 4          |
+| yearly-tax-export        | 1. Jan      | ~8         |
+| installments             | –           | NO-OP      |
+
+### 6.2 Cleanup in bestehenden Job integrieren
+
+```typescript
+// In cleanup-old-records Job:
+
+// Abgelaufene Refresh Tokens (>1 Tag über Ablauf)
+await db.none(`
+  DELETE FROM refresh_tokens
+  WHERE expires_at < NOW() - INTERVAL '1 day'
+`);
+
+// Benutzte / abgelaufene Password Resets
+await db.none(`
+  DELETE FROM password_resets
+  WHERE expires_at < NOW() OR used_at IS NOT NULL
+`);
+
+// Alte gelesene Notifications (> 90 Tage)
+await db.none(`
+  DELETE FROM notifications
+  WHERE read = TRUE AND created_at < NOW() - INTERVAL '90 days'
+`);
+```
+
+### 6.3 Cron Scheduler
+
+```typescript
+// src/crons/index.ts
+import cron from 'node-cron';
+import { runTranslate } from './jobs/translate';
+import { runDsgvoExport } from './jobs/dsgvo-export';
+
+export function startCronJobs() {
+  cron.schedule('*/5 * * * *', async () => {
+    await runTranslate().catch(err => console.error('[cron:translate]', err));
+  });
+
+  cron.schedule('*/10 * * * *', async () => {
+    await runDsgvoExport().catch(err => console.error('[cron:dsgvo-export]', err));
+  });
+
+  cron.schedule('0 8 * * *', async () => {
+    await runBookingReminders().catch(err => console.error('[cron:booking-reminders]', err));
+  });
+
+  console.log('[cron] Alle Jobs gestartet');
+}
+```
+
+---
+
+## 7. Phase 4 – Frontend anpassen (Woche 4–6)
+
+### 7.1 Supabase entfernen
+
+```bash
+npm uninstall @supabase/supabase-js @supabase/auth-helpers-nextjs
+```
+
+### 7.2 API Calls umstellen
+
+```typescript
+// VORHER (Supabase)
+const { data } = await supabase.from('bookings').select('*')
+
+// NACHHER
+const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/bookings`, {
+  headers: { 'Authorization': `Bearer ${getAccessToken()}` }
+})
+const data = await response.json()
+```
+
+### 7.3 Token Management im Frontend
+
+```typescript
+// lib/auth.ts
+let inMemoryAccessToken: string | null = null;
+
+// Access Token nur im Memory (nie localStorage – XSS Schutz)
+export const setAccessToken = (token: string) => { inMemoryAccessToken = token; };
+export const getAccessToken = () => inMemoryAccessToken;
+export const clearAccessToken = () => { inMemoryAccessToken = null; };
+
+// Refresh läuft über httpOnly Cookie (automatisch mitgesendet)
+export async function refreshAccessToken(): Promise<boolean> {
+  const res = await fetch('/auth/refresh', { method: 'POST', credentials: 'include' });
+  if (!res.ok) { clearAccessToken(); return false; }
+  const { accessToken } = await res.json();
+  setAccessToken(accessToken);
+  return true;
+}
+```
+
+### 7.4 Middleware (Next.js)
+
+```typescript
+// middleware.ts
+import { NextRequest, NextResponse } from 'next/server'
+import { jwtVerify } from 'jose'
+
+export async function middleware(request: NextRequest) {
+  const token = request.cookies.get('access_token')?.value
+    ?? request.headers.get('Authorization')?.replace('Bearer ', '');
+
+  if (!token) return NextResponse.redirect(new URL('/login', request.url));
+
+  try {
+    await jwtVerify(token, new TextEncoder().encode(process.env.JWT_SECRET));
+    // Supabase-Session-Prüfung entfällt komplett
+  } catch {
+    return NextResponse.redirect(new URL('/login', request.url));
+  }
+}
+```
+
+### 7.5 Env-Variablen (Vercel)
+
+```bash
+# Entfernen:
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+
+# Hinzufügen:
+NEXT_PUBLIC_API_URL=https://api.frey-one.com
+JWT_SECRET=dein_sicheres_secret_min_32_zeichen
+```
+
+---
+
+## 8. Phase 5 – CI/CD Pipeline (Woche 5–6)
+
+### 8.1 GitHub Actions Workflow
+
+```yaml
+# .github/workflows/deploy-api.yml
+name: Deploy API to VPS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/api/**'
+      - 'packages/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy auf VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_IP }}
+          username: deploy
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: /home/deploy/scripts/deploy-api.sh
+```
+
+### 8.2 Deploy Script (zero-downtime)
+
+```bash
+#!/bin/bash
+# /home/deploy/scripts/deploy-api.sh
+
+REPO_DIR="/home/deploy/freyone"
+API_DIR="$REPO_DIR/apps/api"
+LOG="[$(date '+%Y-%m-%d %H:%M:%S')]"
+
+echo "$LOG Deploy gestartet"
+cd $REPO_DIR && git pull origin main
+cd $API_DIR
+npm ci
+npm run build
+
+pm2 reload freyone-api --update-env
+pm2 save
+
+echo "$LOG Deploy erfolgreich"
+```
+
+### 8.3 GitHub Secrets
+
+```
+GitHub Repo → Settings → Secrets → Actions:
+  VPS_IP      → Hetzner IP-Adresse
+  VPS_SSH_KEY → Private SSH Key (Inhalt von ~/.ssh/hetzner_vps)
+```
+
+---
+
+## 9. Phase 6 – GFS Backups (Cloudflare R2)
+
+### 9.1 rclone konfigurieren
+
+```bash
+rclone config
+# → n → Name: r2 → s3 → Cloudflare
+# → Access Key ID, Secret Key, Account ID
+# → Endpoint: https://ACCOUNT_ID.r2.cloudflarestorage.com
+```
+
+### 9.2 GFS Backup Script
+
+```bash
+#!/bin/bash
+# /home/deploy/scripts/backup.sh
+
+R2_BUCKET="r2:freyone-backups"
+DATE=$(date +%Y%m%d)
+DOW=$(date +%u)
+DOM=$(date +%d)
+TMP="/tmp/backups"
+mkdir -p $TMP
+
+backup_db() {
+  local DB=$1
+  local FILE="$TMP/${DB}_${DATE}.sql.gz"
+  pg_dump -U postgres -h localhost $DB | gzip > $FILE
+  echo $FILE
+}
+
+# SOHN (täglich)
+for DB in freyone_prod company_internal; do
+  FILE=$(backup_db $DB)
+  rclone copy $FILE "${R2_BUCKET}/daily/${DB}/" --quiet
+done
+
+# VATER (jeden Sonntag)
+if [ "$DOW" = "7" ]; then
+  WEEK=$(date +%Y-KW%V)
+  for DB in freyone_prod company_internal; do
+    FILE="$TMP/${DB}_weekly_${WEEK}.sql.gz"
+    pg_dump -U postgres -h localhost $DB | gzip > $FILE
+    rclone copy $FILE "${R2_BUCKET}/weekly/${DB}/" --quiet
+  done
+fi
+
+# GROSSVATER (jeden 1. des Monats)
+if [ "$DOM" = "01" ]; then
+  MONTH=$(date +%Y-%m)
+  for DB in freyone_prod company_internal; do
+    FILE="$TMP/${DB}_monthly_${MONTH}.sql.gz"
+    pg_dump -U postgres -h localhost $DB | gzip > $FILE
+    rclone copy $FILE "${R2_BUCKET}/monthly/${DB}/" --quiet
+  done
+fi
+
+rclone delete "${R2_BUCKET}/daily/"   --min-age 7d   --quiet
+rclone delete "${R2_BUCKET}/weekly/"  --min-age 28d  --quiet
+rclone delete "${R2_BUCKET}/monthly/" --min-age 365d --quiet
+rm -f $TMP/*.sql.gz
+
+echo "[$(date)] Backup abgeschlossen"
+```
+
+### 9.3 Backup Crontab
+
+```bash
+0 3 * * * /home/deploy/scripts/backup.sh >> /var/log/backup.log 2>&1
+```
+
+---
+
+## 10. Phase 7 – Monitoring & Alerts
+
+### 10.1 healthchecks.io
+
+```typescript
+// Nach jedem Cron-Job-Durchlauf
+await fetch(process.env.HC_5MIN_URL).catch(() => {});
+// Bei Fehler:
+await fetch(`${process.env.HC_5MIN_URL}/fail`).catch(() => {});
+```
+
+| Check-Name    | Period   | Grace    |
+|---------------|----------|----------|
+| crons-5min    | 5 Min    | 3 Min    |
+| crons-10min   | 10 Min   | 5 Min    |
+| crons-hourly  | 60 Min   | 10 Min   |
+| crons-daily   | 24 Std   | 30 Min   |
+| backup-daily  | 24 Std   | 60 Min   |
+
+### 10.2 UptimeRobot
+
+```
+uptimerobot.com → New Monitor → Ping Monitor
+Name: "FreyOne VPS" | IP: Hetzner IP | Interval: 5 Min | Alert: E-Mail
+```
+
+### 10.3 Log Rotation
+
+```
+/var/log/freyone/*.log {
+  daily; rotate 7; compress; missingok; notifempty
+  create 0644 deploy deploy
+}
+/var/log/backup.log {
+  weekly; rotate 4; compress; missingok
+}
+```
+
+---
+
+## 11. Phase 8 – Sicherheit
+
+### 11.1 CORS
+
+```typescript
+app.use('*', cors({
+  origin: ['https://frey-one.com', 'https://www.frey-one.com'],
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+```
+
+### 11.2 Security Headers
+
+```typescript
+app.use('*', secureHeaders({
+  contentSecurityPolicy: false,
+  xFrameOptions: 'DENY',
+  xContentTypeOptions: 'nosniff',
+  strictTransportSecurity: 'max-age=31536000'
+}));
+```
+
+### 11.3 Dateiberechtigungen
+
+```bash
+chmod 600 /home/deploy/freyone/apps/api/.env
+chmod 700 /home/deploy/scripts/*.sh
+```
+
+### 11.4 Monatliche Wartungsroutine
+
+```bash
+sudo apt update && sudo apt upgrade -y
+df -h
+pm2 status
+rclone lsd r2:freyone-backups/daily/
+sudo fail2ban-client status sshd
+```
+
+---
+
+## 12. Phase 9 – Go-Live & Cutover
+
+### 12.1 Reihenfolge
+
+```
+1. Backend auf VPS deployen & testen (alle Auth-Flows)
+2. Alle API-Routen gegenchecken (Staging mit echten Test-Usern)
+3. DNS: api.frey-one.com → VPS IP (Cloudflare)
+4. Frontend: NEXT_PUBLIC_API_URL auf api.frey-one.com setzen
+5. Supabase: nur noch Structure-Export (keine Userdaten – bereits migriert)
+6. 48h intensives Monitoring
+7. cron-jobs.org deaktivieren
+8. Supabase Account schließen
+```
+
+### 12.2 Rollback-Plan
+
+```
+1. NEXT_PUBLIC_API_URL zurück auf alten Endpunkt
+2. DNS Cutover rückgängig (Cloudflare: sofort wirksam)
+3. Supabase aktiv lassen bis Cutover bestätigt
+```
+
+---
+
+## 13. S2 – DB Query Caching
+
+### Strategie nach Phase
+
+| Phase | Umgebung | Cache-Lösung | Warum |
+|-------|----------|--------------|-------|
+| Jetzt (Vercel) | Serverless | `unstable_cache` (Next.js) | Einzige Option ohne externe Deps |
+| Nach VPS-Migration | Persistenter Node.js | `node-cache` | Memory bleibt erhalten |
+| Bei Scale | Mehrere Instanzen | Redis (Upstash) | Geteilter Cache |
+
+### Phase B – Nach VPS-Migration: In-Memory Cache
+
+```typescript
+import NodeCache from 'node-cache'
+const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 })
+
+export async function getCachedOrFetch<T>(
+  key: string, ttlSeconds: number, fetcher: () => Promise<T>
+): Promise<T> {
+  const cached = cache.get<T>(key)
+  if (cached !== undefined) return cached
+  const fresh = await fetcher()
+  cache.set(key, fresh, ttlSeconds)
+  return fresh
+}
+```
+
+### Was gecacht wird
+
+| Query                       | TTL     | Invalidierung bei  |
+|-----------------------------|---------|-------------------|
+| `profiles`                  | 5 Min   | Profilupdate       |
+| `provider_profiles`         | 10 Min  | Serviceänderung    |
+| Provider-Listings           | 15 Min  | Serviceänderung    |
+| Membership-Pläne            | 60 Min  | Planänderung       |
+| **bookings**                | **KEIN** | Echtzeitdaten     |
+| **provider_business_details** | **KEIN** | Sensible Daten  |
+
+---
+
+## 14. S4 – GitHub Runners & Automatisierte Tests
+
+### Stufe 1 – Basis CI (sofort, 30 Min Aufwand)
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: 'npm' }
+      - run: npm ci
+      - run: npm run type-check
+      - run: npm run lint
+      - run: npm run build
+```
+
+### Stufe 2 – Playwright E2E (nach erster stabiler Version)
+
+**Kritische Flows:**
+- Register → E-Mail verify → Login
+- Login → Refresh Token → weiter surfen
+- Passwort vergessen → Reset → neues Passwort → Login
+- Buchung erstellen (kompletter Flow)
+- Provider-Profil anlegen
+
+### Stufe 3 – Self-hosted Runner auf VPS
+
+```bash
+mkdir /home/deploy/actions-runner && cd /home/deploy/actions-runner
+curl -o actions-runner.tar.gz -L \
+  https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64-latest.tar.gz
+tar xzf actions-runner.tar.gz
+./config.sh --url https://github.com/DEIN-USER/DEIN-REPO --token TOKEN
+./svc.sh install && ./svc.sh start
+```
+
+---
+
+## 15. Entwickler-Workflow (von jedem Gerät arbeiten)
+
+```bash
+# Neues Gerät
+git clone git@github.com:DEIN-USER/freyone.git
+cd freyone && npm install
+
+# Backend lokal (via SSH-Tunnel auf VPS-DB)
+ssh -L 5433:localhost:6432 vps -N &
+cd apps/api && npm run dev
+
+# Frontend lokal
+cd apps/web && npm run dev
+
+# Immer aktuell
+git pull && npm install
+```
+
+### .env Strategie
+
+| Datei | Ort | Inhalt |
+|-------|-----|--------|
+| `.env.local` | Lokal (in .gitignore) | Dev-Secrets, lokale DB |
+| `.env.production` | Vercel Dashboard | Frontend Production Secrets |
+| `.env` auf VPS | `/home/deploy/freyone/apps/api/` | Backend Production Secrets |
+| Bitwarden | Passwort-Manager | Backup aller Secrets |
+
+---
+
+## 16. Kostenvergleich
+
+| Phase | User | Alte Architektur | Neue Architektur | Ersparnis/Monat |
+|-------|------|-----------------|-----------------|-----------------|
+| Alpha | 0–10 | €0 | €8.32 | –€8.32 |
+| Early | 50–200 | €43+ | €8.32 | **+€35** |
+| Wachstum | 200–500 | €90+ | €16.64 | **+€73** |
+| Scale | 500–2k | €200+ | €35 | **+€165** |
+| Enterprise | 2k–10k | €650+ | €60 | **+€590** |
+
+---
+
+## 17. Finale Checkliste
+
+### Phase 0 – Server Setup
+- [ ] Hetzner CX33 bestellt (Ubuntu 24.04, Primary IPv4, NBG1)
+- [ ] SSH Key erstellt und hochgeladen
+- [ ] deploy-User angelegt, root-Login deaktiviert
+- [ ] UFW Firewall aktiv (Port 22, 80, 443)
+- [ ] Node.js, PM2, PostgreSQL 16, PgBouncer, Caddy, rclone, Fail2ban installiert
+- [ ] Unattended Upgrades aktiviert
+
+### Phase 1 – Datenbank
+- [ ] Extensions aktiviert (uuid-ossp, pgcrypto, pg_trgm)
+- [ ] `freyone_prod` und `company_internal` Datenbanken angelegt
+- [ ] User mit korrekten Rechten und Isolation angelegt
+- [ ] Supabase Schema **strukturell** exportiert (`--schema-only`, keine Daten)
+- [ ] Schema auf VPS importiert
+- [ ] **`provider_business_details` angelegt** (22 Spalten aus provider_profiles ausgelagert)
+- [ ] **22 Spalten aus `provider_profiles` gedroppt** (nur noch 47 Spalten)
+- [ ] **Auth-Tabellen angelegt:** `users` (password_hash NOT NULL), `refresh_tokens` (replaced_by), `password_resets`
+- [ ] **`profiles` → FK Constraint zu `users`** gesetzt
+- [ ] **`email_otp_codes`** vorhanden und für Email-Verifizierung vorgesehen
+- [ ] PostgreSQL Triggers angelegt (updated_at auf alle relevanten Tabellen, claim_next_pending)
+- [ ] **Alle ~40 Indexes** angelegt
+- [ ] **postgresql.conf** (CX33-Tuning: shared_buffers 2GB, random_page_cost 1.1, etc.) angewendet
+- [ ] **Per-Table Autovacuum** (bookings, notifications, messages) konfiguriert
+- [ ] PgBouncer konfiguriert und getestet (Port 6432)
+- [ ] Laptop-Zugriff via SSH-Tunnel getestet
+- [ ] Init-Reihenfolge vollständig abgearbeitet (alle 10 Schritte)
+
+### Phase 2 – Backend (Auth)
+- [ ] **`hash.ts`** implementiert: `hashPassword` (bcrypt Cost 12), `verifyPassword`, `hashToken`, `generateToken`
+- [ ] **Kein Klartext-Passwort** landet jemals in DB oder Logs (Code-Review)
+- [ ] **`tokens.ts`** implementiert: `createRefreshToken`, `rotateRefreshToken` mit Reuse-Detection
+- [ ] **User-Enumeration verhindert**: Register und Forgot-Password geben immer gleiche Antwort
+- [ ] **Timing Attack verhindert**: Login hasht immer (auch bei nicht-existentem User)
+- [ ] **httpOnly Cookie** für Refresh Token (path: `/auth/refresh`)
+- [ ] **Access Token nur im Memory** im Frontend (nie localStorage)
+- [ ] **Nach Passwort-Reset**: alle aktiven Refresh Tokens des Users gelöscht
+- [ ] **Rate Limiting** auf allen Auth-Endpoints (10/15min)
+- [ ] JWT_SECRET min. 256 Bit (openssl rand -base64 48)
+- [ ] Alle Auth-Endpoints implementiert und getestet
+- [ ] Eigene Auth vollständig (Register, Verify, Login, Refresh, Logout, Forgot, Reset)
+- [ ] JWT Middleware implementiert
+- [ ] Alle API-Routen migriert
+- [ ] Stripe Webhooks migriert
+- [ ] Caddy konfiguriert, SSL aktiv
+- [ ] PM2 Cluster Mode, 2 Instanzen
+
+### Phase 3 – Cron Jobs
+- [ ] Alle 21 Jobs als node-cron intern implementiert
+- [ ] Cleanup-Job: abgelaufene Refresh Tokens, Password Resets, alte Notifications
+- [ ] FOR UPDATE SKIP LOCKED in allen relevanten Jobs
+- [ ] healthchecks.io Pings implementiert
+
+### Phase 4 – Frontend
+- [ ] @supabase/supabase-js entfernt
+- [ ] Alle API-Calls auf eigenes Backend umgestellt
+- [ ] Access Token im Memory (nicht localStorage)
+- [ ] Middleware auf eigenes JWT umgestellt
+- [ ] Env-Variablen auf Vercel aktualisiert
+
+### Phase 5 – CI/CD
+- [ ] GitHub Actions Workflow für Backend Deploy
+- [ ] VPS_IP und VPS_SSH_KEY als GitHub Secrets
+- [ ] pm2 reload (zero-downtime) bestätigt
+- [ ] .env auf VPS mit chmod 600 gesichert
+- [ ] Alle Secrets in Bitwarden gesichert
+
+### Phase 6 – Backups
+- [ ] rclone mit Cloudflare R2 konfiguriert
+- [ ] GFS Backup Script (täglich/wöchentlich/monatlich)
+- [ ] Backup manuell getestet (Datei in R2 sichtbar)
+- [ ] Log-Rotation konfiguriert
+
+### Phase 7 – Monitoring
+- [ ] healthchecks.io: 5 Checks angelegt
+- [ ] UptimeRobot: VPS-IP überwacht
+- [ ] E-Mail-Alerts getestet
+
+### Phase 8 – Go-Live
+- [ ] Alle Auth-Flows mit echten Test-Accounts getestet
+- [ ] DNS: api.frey-one.com → VPS
+- [ ] 48h Monitoring ohne Fehler
+- [ ] cron-jobs.org deaktiviert
+- [ ] Supabase Account geschlossen
+
+### S2 – Caching
+- [ ] `node-cache` im Backend eingebaut
+- [ ] Bookings und `provider_business_details` explizit NICHT gecacht
+- [ ] Cache-Invalidierung bei Schreiboperationen implementiert
+
+### Sicherheit – Laufend
+- [ ] JWT Secret Rotation alle 6 Monate geplant
+- [ ] DB-Passwort Rotation alle 12 Monate geplant
+- [ ] Monatliche Wartungsroutine im Kalender
+- [ ] Dependency-Updates (`npm audit`) monatlich
+
+---
+
+*Dokument: FreyOne Infrastruktur-Migrationsplan v3.0 | Juni 2026*
+*Ersetzt: v2.0 (Mai 2026)*
+*Wichtigste Änderungen: Frischer DB-Ansatz, sichere Auth von Tag 1, vollständige Spaltenaufteilung provider_profiles, alle Indexes und Tuning integriert, Lazy Migration entfernt*
+
+Zuletzt: Website mit Design Libs anpassen
