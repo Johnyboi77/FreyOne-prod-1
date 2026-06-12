@@ -1,0 +1,253 @@
+# DB Schema – Compact Reference
+
+## Type Legend
+`str` string · `num` number · `bool` boolean · `ts` timestamp · `uuid` string(uuid) · `json` Json · `?` nullable · `[]` array · `enum` see Enums section
+
+---
+
+## Tables
+
+**accountant_access**
+id:uuid, accepted_at:ts?, accountant_email:str, created_at:ts?, invitation_expires_at:ts?, invitation_token:str?, is_active:bool?, provider_profile_id:uuid, user_id:uuid?
+
+**activity_logs**
+id:uuid, action:str, changes:json?, created_at:ts?, entity_id:uuid?, entity_type:str?, ip_address:inet, provider_id:uuid?, user_id:uuid?
+
+**addresses**
+id:uuid, address_line2:str?, address_type:str, city:str, country:str, country_code:str?, created_at:ts, district:str?, house_number:str?, is_primary:bool, latitude:num?, longitude:num?, postcode:str, provider_id:uuid?, state:str?, street:str
+
+**availability_templates**
+id:uuid, created_at:ts?, day_of_week:num, end_time:str, is_active:bool?, provider_profile_id:uuid, start_time:str, updated_at:ts?
+
+**banned_fingerprints**
+id:uuid, banned_at:ts?, fingerprint_hash:str, provider_profile_id:uuid?, reason:str?
+
+**blocked_customers**
+id:uuid, blocked_at:ts?, customer_id:uuid, provider_id:uuid, reason:str?
+
+**blocked_times**
+id:uuid, created_at:ts?, end_time:str, notes:str?, provider_profile_id:uuid, reason:str, start_time:str
+
+**bookings**
+id:uuid, actual_end_time:ts?, actual_start_time:ts?, addon_ids:str[]?, authorized_amount_cents:num?, booking_date:str, booking_time:str?, buffer_percentage:num?, cancellation_reason:str?, cancelled_at:ts?, cancelled_by:uuid?, captured_amount_cents:num?, completion_timer_expires_at:ts?, confirmed_at:ts?, confirmed_by_customer_at:ts?, confirmed_by_provider_at:ts?, created_at:ts, customer_id:uuid, customer_notes:str?, duration_minutes:num?, estimated_amount_cents:num?, final_amount_confirmed_at:ts?, final_amount_confirmed_by:uuid?, follow_up_sent_at:ts?, invoice_id:uuid?, metadata:json?, payment_intent_id:uuid?, payment_status:str?, provider_id:uuid, provider_notes:str?, quote_id:uuid?, refund_reason:str?, refunded_at:ts?, reminder_sent_at:ts?, requires_confirmation:bool?, service_id:uuid, service_variant_id:uuid?, status:booking_status, subtotal_cents:num?, tax_amount_cents:num?, tax_rate:num?, total_amount_cents:num, total_with_tax_cents:num?
+
+**broadcast_log**
+id:uuid, created_at:ts, emails_sent:num, message:str, notifications_sent:num, send_email:bool, sent_by:uuid, target:str, title:str
+
+**calendar_connections**
+id:uuid, access_token:str?, calendar_id:str?, created_at:ts?, freebusy_enabled:bool, last_synced_at:ts?, provider:str, provider_profile_id:uuid, refresh_token:str?, sync_bookings:bool?, token_expires_at:ts?
+
+**conversations**
+id:uuid, conversation_type:str?, created_at:ts, customer_id:uuid, last_message_at:ts?, provider_id:uuid?, sup_ticket_id:str?, support_admin_alias:str?
+
+**customer_notes**
+id:uuid, created_at:ts?, customer_id:uuid, note_text:str, provider_id:uuid, updated_at:ts?
+
+**customer_payment_methods**
+id:uuid, account_holder_confirmed:bool?, account_holder_name:str?, card_brand:str?, card_exp_month:num?, card_exp_year:num?, card_last4:str?, confirmed_at:ts?, created_at:ts?, is_default:bool?, sepa_bank_code:str?, sepa_last4:str?, stripe_payment_method_id:str, type:str, updated_at:ts?, user_id:uuid
+
+**customer_vouchers**
+id:uuid, customer_id:uuid, provider_id:uuid, sent_at:ts?, used_at:ts?, used_in_booking_id:uuid?, voucher_id:uuid
+
+**daily_limits**
+id:uuid, created_at:ts?, max_total_bookings:num, provider_profile_id:uuid, updated_at:ts?
+
+**deletion_log**
+id:uuid, affected_tables:json?, email_at_deletion:str?, executed_at:ts?, executed_by:str?, name_at_deletion:str?, reason:str?, requested_at:ts?, stripe_customer_id:str?, total_bookings:num?, user_id:uuid, user_type:str
+
+**dsgvo_export_requests**
+id:uuid, error_message:str?, processed_at:ts?, requested_at:ts, sent_to_email:str?, status:str, user_id:uuid
+
+**email_otp_codes**
+id:uuid, attempts:num, code_hash:str, created_at:ts, expires_at:ts, used_at:ts?, user_id:uuid
+
+**external_busy_blocks**
+id:uuid, calendar_connection_id:uuid?, created_at:ts, end_time:ts, external_uid:str?, provider_profile_id:uuid, start_time:ts, summary:str?
+
+**failed_emails**
+id:uuid, attempts:num?, created_at:ts?, error_message:str?, html_body:str, last_attempt_at:ts?, priority:num?, status:str?, subject:str, template_data:json?, template_type:str, to_email:str
+
+**geocode_cache**
+id:uuid, cache_key:str, created_at:ts, expires_at:ts, hit_count:num, query_text:str, response:json
+
+**incidents**
+id:uuid, context_id:str?, context_type:str?, created_at:ts?, description:str?, reason:str, reported_provider_id:uuid?, reported_user_id:uuid?, reporter_id:uuid?, status:str?
+
+**invoices**
+id:uuid, booking_id:uuid?, created_at:ts, customer_id:uuid, customer_snapshot:json, due_date:str?, internal_notes:str?, invoice_date:str, invoice_number:str, line_items:json, notes:str?, paid_at:ts?, pdf_generated_at:ts?, pdf_url:str?, provider_id:uuid, provider_snapshot:json, sent_at:ts?, show_logo:bool?, status:str?, subtotal_cents:num, tax_amount_cents:num, tax_rate:num?, template:str?, total_cents:num, updated_at:ts
+
+**limit_alerts_log**
+id:uuid, cycle_month:str, metric_name:str, sent_at:ts?, service_name:str, threshold_percent:num
+
+**membership_history**
+id:uuid, action:str, created_at:ts, from_tier:str?, metadata:json, provider_profile_id:uuid, to_tier:str?
+
+**membership_plans**
+id:uuid, created_at:ts, description:str?, features:json, is_active:bool, limits:json, min_transaction_fee_cents:num, monthly_price_cents:num, name:str, sort_order:num, stripe_monthly_price_id:str?, stripe_yearly_price_id:str?, tax_inclusive:bool, tax_rate:num, tier:str, transaction_fee_percent:num, updated_at:ts, yearly_price_cents:num
+
+**message_attachments**
+id:uuid, created_at:ts?, file_name:str, file_size:num, file_type:str, file_url:str, height:num?, message_id:uuid, mime_type:str, thumbnail_url:str?, width:num?
+
+**messages**
+id:uuid, admin_display_name:str?, content:str, conversation_id:uuid, created_at:ts, is_read:bool?, message_type:str?, read_at:ts?, sender_id:uuid
+
+**notification_preferences**
+id:uuid, created_at:ts?, email_booking_confirmed:bool?, email_cancellation:bool?, email_marketing:bool?, email_membership_expiring:bool, email_new_booking:bool?, email_new_message:bool?, email_new_review:bool, email_payment:bool?, email_payout:bool, email_reminder:bool?, email_review_request:bool?, in_app_booking_confirmed:bool?, in_app_cancellation:bool, in_app_marketing:bool, in_app_membership_expiring:bool, in_app_new_booking:bool, in_app_new_message:bool, in_app_new_review:bool, in_app_payment:bool, in_app_payout:bool, in_app_reminder:bool, in_app_review_request:bool?, push_booking_reminder:bool?, push_new_booking:bool?, push_new_message:bool?, push_new_review:bool, sound_enabled:bool?, updated_at:ts?, user_id:uuid
+
+**notifications**
+id:uuid, created_at:ts?, expires_at:ts?, link:str?, message:str?, metadata:json?, read:bool?, read_at:ts?, related_entity_id:str?, related_entity_type:str?, sender_id:uuid?, title:str, type:notification_type, user_id:uuid
+
+**password_resets**
+id:uuid, user_id:uuid, token_hash:str, expires_at:ts, used_at:ts?, created_at:ts
+
+**payment_intents**
+id:uuid, adjustment_reason:str?, amount_cents:num, application_fee_cents:num, booking_id:uuid, buffer_amount_cents:num?, capture_method:str?, captured_at:ts?, client_secret:str?, created_at:ts?, customer_fee_cents:num, customer_stripe_id:str, estimated_amount_cents:num?, expires_at:ts?, final_amount_cents:num?, metadata:json?, provider_fee_cents:num, provider_stripe_account_id:str, service_amount_cents:num, status:str, stripe_payment_intent_id:str, updated_at:ts?
+
+**payments**
+id:uuid, amount_cents:num, booking_id:uuid?, created_at:ts?, currency:str?, description:str?, error_code:str?, error_message:str?, invoice_number:str?, metadata:json?, paid_at:ts?, payment_method_brand:str?, payment_method_last4:str?, payment_method_type:str?, platform_fee_cents:num?, provider_amount_cents:num?, provider_id:uuid?, receipt_url:str?, refund_amount_cents:num?, refund_reason:str?, refunded_at:ts?, status:str, stripe_charge_id:str?, stripe_customer_id:str?, stripe_payment_intent_id:str?, stripe_refund_id:str?, stripe_transfer_id:str?, updated_at:ts?, user_id:uuid?
+
+**payouts**
+id:uuid, amount_cents:num, arrival_date:str?, created_at:ts?, description:str?, failure_message:str?, metadata:json?, provider_id:uuid, status:str, stripe_payout_id:str?, updated_at:ts?
+
+**platform_monthly_expenses**
+id:uuid, aws_s3_cents:num?, domain_cents:num?, einkommensteuer_cents:num?, gewerbesteuer_cents:num?, here_maps_cents:num?, month_year:str, notes:str?, other_infra_cents:num?, other_infra_note:str?, posthog_cents:num?, resend_cents:num?, soli_cents:num?, stripe_connect_cents:num?, stripe_processing_cents:num?, supabase_cents:num?, updated_at:ts?, vat_percent:num?, vercel_cents:num?, created_at:ts?
+
+**platform_stats**
+count_bookings:num, count_providers:num, count_reviews:num, count_users:num, month:num, snapshot_at:ts, year:num
+
+**popular_searches**
+id:uuid, language_code:str, last_searched_at:ts, query_text:str, search_count:num
+
+**pricing_rules**
+id:uuid, additional_price_cents:num?, created_at:ts?, days_of_week:num[]?, end_hour:num?, is_active:bool?, min_hours_before:num?, multiplier:num?, priority:num?, provider_id:uuid, rule_type:str, season_end_month:num?, season_start_month:num?, service_id:uuid, start_hour:num?
+
+**profiles**
+id:uuid, accepted_terms_at:ts?, ban_reason:str?, banned_at:ts?, banned_by:uuid?, city:str?, company_name:str?, country:str?, created_at:ts, date_of_birth:str?, default_payment_method_id:uuid?, device_fingerprint_hash:str?, email:str, email_verified:bool?, first_name:str, has_payment_method:bool?, house_number:str?, is_banned:bool, is_provider:bool?, last_name:str, latitude:num?, longitude:num?, payment_account_confirmed:bool?, payment_account_holder_name:str?, postal_code:str?, profile_complete:bool?, profile_image_url:str?, search_sort_preference:str?, street:str?, stripe_customer_id:str?, theme:str?, totp_enabled:bool, totp_secret:str?, updated_at:ts, url_token:str?
+
+**provider_business_details**
+provider_profile_id:uuid, business_tax_number:str?, business_vat_number:str?, business_court_registration:str?, is_business_registered:bool?, business_type:str?, certificates:json?, license_documents:json?, impressum:str?, privacy_policy:str?, terms_conditions:str?, business_street:str?, business_house_number:str?, business_city:str?, business_postal_code:str?, address_line2:str?, owner_first_name:str, owner_last_name:str, owner_date_of_birth:str?, accepted_provider_terms_at:ts?, invoice_settings:json?, payout_schedule:str?, minimum_payout_amount:num?, created_at:ts, updated_at:ts
+
+**provider_memberships**
+id:uuid, billing_interval:str?, cancel_at_period_end:bool, canceled_at:ts?, created_at:ts, current_period_end:ts?, current_period_start:ts?, metadata:json, plan_id:uuid, priority_support_enabled:bool, provider_profile_id:uuid, status:str, stripe_customer_id:str?, stripe_latest_invoice_id:str?, stripe_subscription_id:str?, tier:str, trial_end:ts?, trial_start:ts?, updated_at:ts
+
+**provider_profiles**
+id:uuid, account_is_active:bool, age_restriction:num?, average_rating:num, business_description:str?, business_email:str?, business_email_verification_sent_at:ts?, business_email_verified:bool?, business_is_verified:bool?, business_name:str, business_phone_number:str?, business_phone_verified:bool?, business_slug:str?, can_accept_bookings:bool, cancellation_policy:str?, country:str, created_at:ts, district:str?, financial_access_paused:bool, has_first_service:bool?, has_payment_method:bool?, is_profile_complete:bool?, is_small_business:bool, latitude:num?, location_type:str?, logo_url:str?, longitude:num?, onboarding_completed_at:ts?, primary_category_id:uuid?, profile_picture_url:str?, secondary_category_id:uuid?, service_area_type:str?, service_cities:str[]?, service_radius_km:num?, short_description:str?, state:str?, stripe_account_id:str?, stripe_charges_enabled:bool, stripe_connect_deadline:ts?, stripe_payouts_enabled:bool, stripe_verified_user:bool?, tags:str[]?, total_bookings:num, total_ratings:num, updated_at:ts, user_id:uuid, working_hours:json?
+
+**provider_strikes**
+id:uuid, created_at:ts?, last_action:str?, last_admin_id:uuid?, last_updated:ts?, provider_profile_id:uuid, status:str, strike_count:num, strike_history:json
+
+**provider_temporary_plans**
+id:uuid, created_at:ts?, expiration_date:str, provider_profile_id:uuid, temporary_plan:str
+
+**provider_translations**
+id:uuid, business_description:str?, created_at:ts?, error_message:str?, language_code:str, last_attempted_at:ts?, provider_profile_id:uuid, retry_count:num, short_description:str?, translated_by:str?, translation_pending_since:ts?, translation_status:str?, updated_at:ts?
+
+**provider_verifications**
+id:uuid, approval_email_sent_at:ts?, approved_at:ts?, approved_by:uuid?, created_at:ts, document_content_type:str?, document_path:str?, provider_id:uuid, rejected_at:ts?, rejected_reason:str?, submitted_at:ts?, updated_at:ts
+
+**push_subscriptions**
+id:uuid, auth:str, created_at:ts?, device_name:str?, endpoint:str, is_active:bool?, last_used_at:ts?, p256dh:str, user_agent:str?, user_id:uuid
+
+**push_tokens**
+id:uuid, created_at:ts, last_seen_at:ts, platform:str, token:str, user_id:uuid
+
+**quotes**
+id:uuid, booking_id:uuid?, components:json, created_at:ts, customer_id:uuid, message:str?, provider_id:uuid, service_id:uuid, status:quote_status, total_cents:num, updated_at:ts, valid_until:ts
+
+**refresh_tokens**
+id:uuid, user_id:uuid, token_hash:str, user_agent:str?, ip_address:inet?, expires_at:ts, replaced_by:uuid?, created_at:ts
+
+**reviews**
+id:uuid, booking_id:uuid, created_at:ts?, customer_id:uuid?, display_type:num, provider_id:uuid, rating:num, review_text:str?
+
+**search_index**
+id:uuid, can_accept_bookings:bool?, category_ids:str[]?, created_at:ts?, description_de:str?, description_en:str?, entity_id:uuid, entity_type:str, is_active:bool?, is_featured:bool?, is_verified:bool?, last_booking_at:ts?, price_max:num?, price_min:num?, pricing_type:str?, primary_category_id:uuid?, provider_id:uuid, rating:num?, response_rate:num?, response_time_hours:num?, search_vector_de:tsvector, search_vector_en:tsvector, service_area_type:str?, service_radius_km:num?, tags:str[]?, title_de:str?, title_en:str?, total_bookings:num?, total_ratings:num?, updated_at:ts?
+
+**service_addon_translations**
+id:uuid, addon_description:str?, addon_name:str?, created_at:ts?, error_message:str?, language_code:str, last_attempted_at:ts?, retry_count:num, service_addon_id:uuid, translated_by:str?, translation_pending_since:ts?, translation_status:str?, updated_at:ts?
+
+**service_addons**
+id:uuid, addon_description:str?, addon_name:str, addon_price_cents:num, created_at:ts?, display_order:num?, is_active:bool?, is_required:bool?, max_quantity:num?, service_id:uuid
+
+**service_cancellation_rules**
+id:uuid, created_at:ts?, hours_before_service:num, refund_percentage:num, service_id:uuid
+
+**service_categories**
+id:uuid, created_at:ts, description:str?, description_de:str?, description_en:str?, icon_url:str?, is_active:bool?, level:num?, name_de:str, name_en:str, parent_id:uuid?, path:str?, path_ids:str[]?, service_count:num?, slug:str?, sort_order:num?, tags_en:str[]?, updated_at:ts?
+
+**service_category_mappings**
+category_id:uuid, path:str?, service_id:uuid
+
+**service_translations**
+id:uuid, created_at:ts?, description:str?, error_message:str?, language_code:str, last_attempted_at:ts?, retry_count:num, service_id:uuid, short_description:str?, tags:str[]?, terms_url:str?, title:str, translated_by:str?, translation_pending_since:ts?, translation_status:str?, updated_at:ts?
+
+**service_usage**
+id:uuid, current_usage:num, max_limit:num, metric_name:str, percentage:num?, resets_at:ts?, service_name:str, updated_at:ts?
+
+**service_usage_history**
+id:uuid, created_at:ts?, metric_name:str, percentage:num, service_name:str, snapshot_date:ts, usage_value:num
+
+**service_variant_translations**
+id:uuid, created_at:ts?, error_message:str?, language_code:str, last_attempted_at:ts?, retry_count:num, service_variant_id:uuid, translated_by:str?, translation_pending_since:ts?, translation_status:str?, updated_at:ts?, variant_description:str?, variant_name:str?
+
+**service_variants**
+id:uuid, created_at:ts, is_available:bool, service_id:uuid, sort_order:num?, variant_description:str, variant_name:str, variant_price_cents:num
+
+**services**
+id:uuid, available_slots_per_day:num?, buffer_config:json?, cancellation_hours:num?, cancellation_policy:str?, category_id:uuid, copied_from_service_id:uuid?, created_at:ts, discount_end_date:str?, discount_label:str?, discount_start_date:str?, discount_type:str?, discount_value:num?, duration_minutes:num?, images:str[]?, immediate_execution:bool?, is_active:bool?, is_deposit:bool, is_digital_product:bool?, location:str?, max_advance_days:num?, max_quantity:num?, min_advance_hours:num?, min_quantity:num?, pricing_config:json?, pricing_unit:str?, provider_id:uuid, provider_terms_url:str?, requires_approval:bool?, search_vector:tsvector, service_description:str, service_price_cents:num, service_title:str, service_type:str?, slug:str?, tags:str[]?, tax_inclusive:bool, tax_rate:num?, updated_at:ts, video_url:str?, views_count:num?, withdrawal_notice_url:str?, withdrawal_waiver_url:str?
+
+**tax_settings**
+id:uuid, business_type:str, created_at:ts, default_tax_rate:num, effective_from:ts, is_active:bool, notes:str?, tax_id_number:str?, updated_at:ts
+
+**team_members**
+id:uuid, accepted_at:ts?, accepted_terms_at:ts?, accepted_terms_version_id:uuid?, alias:str?, created_at:ts, invited_at:ts, invited_by:uuid?, is_active:bool, permissions:json, provider_profile_id:uuid, require_2fa:bool, role:str, updated_at:ts, user_id:uuid
+
+**terms_versions**
+id:uuid, content_url:str?, created_at:ts, effective_date:ts, is_active:bool, requires_acceptance:bool, summary:str?, title:str, type:str, updated_at:ts, version:str
+
+**transactions**
+id:uuid, amount_cents:num, booking_id:uuid, created_at:ts?, description:str?, fee_amount_cents:num?, from_user_id:uuid?, metadata:json?, net_amount_cents:num, payment_intent_id:uuid?, status:str, stripe_transaction_id:str?, to_user_id:uuid?, type:str
+
+**user_favorites**
+id:uuid, created_at:ts?, provider_profile_id:uuid?, service_id:uuid?, user_id:uuid
+
+**user_terms_acceptances**
+id:uuid, accepted_at:ts, ip_address:str?, terms_version_id:uuid, user_agent:str?, user_id:uuid
+
+**users**
+id:uuid, email:str, password_hash:str, role:str, email_verified:bool, is_banned:bool, created_at:ts, updated_at:ts
+
+**vouchers**
+id:uuid, applicable_service_ids:str[]?, auto_send_after_bookings:num?, code:str, created_at:ts?, discount_type:str, discount_value:num, is_active:bool?, provider_id:uuid, updated_at:ts?, usage_limit:num?, used_count:num?, valid_from:ts?, valid_until:ts?
+
+---
+
+## Views
+
+**provider_earnings_summary**
+provider_id:uuid?, booking_count:num?, total_earnings:num?
+
+**user_payments_summary**
+customer_id:uuid?, payment_count:num?, total_paid:num?
+
+---
+
+## Enums
+
+booking_status: `pending` `confirmed` `completed` `cancelled`
+booking_type: `instant` `request` `quote` `recurring`
+business_type_enum: `einzelunternehmen` `gbr` `gmbh` `ug` `freelancer` `other`
+invoice_status: `draft` `sent` `paid` `overdue` `cancelled`
+location_type: `on_site` `remote` `hybrid`
+membership_status: `active` `cancelled` `past_due` `trialing` `incomplete`
+membership_tier: `free` `pro` `enterprise`
+message_type: `text` `image` `system` `booking_update`
+notification_type: `booking_created` `booking_confirmed` `booking_cancelled` `booking_completed` `booking_reminder` `review_received` `review_replied` `message_received` `message_unread` `profile_viewed` `new_inquiry` `payment_received` `payment_failed` `verification_approved` `verification_rejected` `profile_update_required` `review_request` `email_verification_user` `email_verification_provider` `broadcast`
+payment_intent_status: `created` `requires_payment` `authorized` `captured` `cancelled` `failed`
+payment_status: `pending` `authorized` `captured` `failed` `refunded` `cancelled`
+payout_status: `pending` `in_transit` `paid` `failed` `cancelled`
+quote_status: `draft` `sent` `accepted` `rejected` `expired`
+time_tracking_status: `active` `paused` `completed` `disputed`
+transaction_status: `pending` `completed` `failed` `reversed`
+transaction_type: `payment` `refund` `payout` `fee` `adjustment`
+verification_status: `unverified` `pending` `approved` `rejected`

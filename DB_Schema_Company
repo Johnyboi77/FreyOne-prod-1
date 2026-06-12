@@ -1,0 +1,98 @@
+# DB Schema – Company Internal – Compact Reference
+
+## Type Legend
+`str` string · `num` number · `bool` boolean · `ts` timestamp · `uuid` string(uuid) · `json` Json · `?` nullable · `[]` array · `enum` see Enums section
+
+---
+
+## Tables
+
+**acc_invoices_in**
+id:uuid, supplier_name:str, invoice_number:str, total_amount:num, is_paid:bool, created_by:uuid?, created_at:ts
+
+**acc_invoices_out**
+id:uuid, customer_id:uuid?, invoice_number:str, total_amount:num, is_paid:bool, created_by:uuid?, created_at:ts, updated_by:uuid?, updated_at:ts
+
+**acc_receipts**
+id:uuid, employee_id:uuid?, amount:num, file_url:str, created_by:uuid?, created_at:ts
+
+**admin_otp_sessions**
+id:uuid, employee_id:uuid, otp_hash:str, expires_at:ts, attempts:num, used:bool, created_at:ts
+
+**admin_refresh_tokens**
+id:uuid, employee_id:uuid, token_hash:str, user_agent:str?, ip_address:inet?, expires_at:ts, replaced_by:uuid?, created_at:ts
+
+**alert_messages**
+id:uuid, employee_id:uuid, title:str, body:str, action_url:str?, is_read:bool, created_at:ts
+
+**alert_preferences**
+id:uuid, employee_id:uuid, email_alerts:bool, in_app_alerts:bool, updated_at:ts
+
+**core_audit_logs**
+id:uuid, table_name:str, record_id:str?, action:str, old_data:json?, new_data:json?, created_by:uuid?, created_at:ts
+
+**core_backups**
+id:uuid, product_id:uuid?, backup_date:ts, file_size_mb:num?, status:str, created_by:uuid?, created_at:ts
+
+**core_employee_rights**
+id:uuid, employee_id:uuid, product_id:uuid, module:str, access_level:str, created_by:uuid?, created_at:ts, updated_by:uuid?, updated_at:ts
+
+**core_employees**
+id:uuid, auth_user_id:uuid?, first_name:str, last_name:str, email:str, birthday:str?, url_token:str?, is_active:bool, department:str?, created_by:uuid?, created_at:ts, updated_by:uuid?, updated_at:ts, last_password_change:ts?, admin_alias:str?, totp_secret:str?, totp_enabled:bool?, last_login:ts?, password_hash:str?
+
+**core_products**
+id:uuid, name:str, version:str?, is_active:bool, created_by:uuid?, created_at:ts, updated_by:uuid?, updated_at:ts
+
+**core_rights_logs**
+id:uuid, employee_id:uuid, changed_by_user_id:uuid?, product_id:uuid, module:str, old_access_level:str?, new_access_level:str, action:str, changed_at:ts
+
+**core_settings**
+id:uuid, company_name:str, logo_url:str?, primary_color:str?, currency:str, tax_rate:num, updated_by:uuid?, updated_at:ts
+
+**fin_budgets**
+id:uuid, department:str, total_amount:num, created_by:uuid?, created_at:ts, updated_by:uuid?, updated_at:ts
+
+**fin_expenses**
+id:uuid, budget_id:uuid, title:str, amount:num, created_by:uuid?, created_at:ts
+
+**fin_reports**
+id:uuid, title:str, data_snapshot:json?, created_by:uuid?, created_at:ts
+
+**inv_bookings**
+id:uuid, item_id:uuid, employee_id:uuid, assigned_at:ts, returned_at:ts?, created_by:uuid?, created_at:ts
+
+**inv_items**
+id:uuid, type_id:uuid, name:str, serial_number:str?, expiration_date:str?, created_by:uuid?, created_at:ts, updated_by:uuid?, updated_at:ts
+
+**inv_types**
+id:uuid, name:str, requires_return:bool
+
+**job_listings**
+id:uuid, title:str, department:str?, location:str?, working_amount:enum?, experience_level:str?, start_date:str?, summary:str?, description:str?, tasks:str?, requirements:str?, benefits:str?, contact_name:str?, contact_email:str?, slug:str?, is_active:bool, created_at:ts, updated_at:ts
+
+**mkt_campaigns**
+id:uuid, name:str, budget:num?, created_by:uuid?, created_at:ts, updated_by:uuid?, updated_at:ts
+
+**mkt_leads**
+id:uuid, campaign_id:uuid?, company_name:str, status:str, created_at:ts
+
+**mkt_links**
+id:uuid, campaign_id:uuid?, target_url:str, clicks:num
+
+**sales_activities**
+id:uuid, deal_id:uuid, employee_id:uuid?, activity_type:str, created_at:ts
+
+**sales_customers**
+id:uuid, company_name:str, is_active:bool, created_by:uuid?, created_at:ts, updated_by:uuid?, updated_at:ts, platform_user_id:uuid?, platform_provider_id:uuid?, email:str?
+
+**sales_deals**
+id:uuid, customer_id:uuid, title:str, amount:num?, stage:str, created_by:uuid?, created_at:ts, updated_by:uuid?, updated_at:ts
+
+**sup_levels**
+id:uuid, level_number:num, name:str, escalation_manager_id:uuid?
+
+---
+
+## Enums
+
+working_amount: `full_time` `part_time` `mini_job` `freelance`
