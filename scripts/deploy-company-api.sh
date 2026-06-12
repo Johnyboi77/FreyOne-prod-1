@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 REPO_DIR="/home/deploy/company"
 API_DIR="$REPO_DIR/api"
 LOG="[$(date '+%Y-%m-%d %H:%M:%S')]"
@@ -8,7 +9,7 @@ cd $REPO_DIR || exit 1
 git pull origin main
 
 cd $API_DIR || exit 1
-npm ci
+npm ci --legacy-peer-deps
 npm run build
 
 pm2 reload company-api --update-env
