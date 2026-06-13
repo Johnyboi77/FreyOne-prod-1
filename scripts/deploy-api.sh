@@ -1,5 +1,7 @@
 #!/bin/bash
 set -e
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 REPO_DIR="/home/deploy/freyone"
 API_DIR="$REPO_DIR/apps/api"
 LOG="[$(date '+%Y-%m-%d %H:%M:%S')]"
